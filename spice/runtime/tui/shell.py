@@ -610,7 +610,10 @@ class SpiceTUIShell:
             )
             if self._block_for_pre_run_evidence_gate(gate, stream=stream):
                 return
-            if self._block_if_required_evidence_is_still_missing(gate, stream=stream):
+            if (
+                gate.action != PRE_RUN_EVIDENCE_RUN_URL_PERCEPTION
+                and self._block_if_required_evidence_is_still_missing(gate, stream=stream)
+            ):
                 return
             if gate.should_run_url_perception or gate.action == PRE_RUN_EVIDENCE_RUN_URL_PERCEPTION:
                 _stream_status(stream, _url_evidence_status_label(), model_detail)
@@ -737,7 +740,10 @@ class SpiceTUIShell:
                 )
                 if self._block_for_pre_run_evidence_gate(gate, stream=stream):
                     return
-                if self._block_if_required_evidence_is_still_missing(gate, stream=stream):
+                if (
+                    gate.action != PRE_RUN_EVIDENCE_RUN_URL_PERCEPTION
+                    and self._block_if_required_evidence_is_still_missing(gate, stream=stream)
+                ):
                     return
                 if gate.should_run_url_perception or gate.action == PRE_RUN_EVIDENCE_RUN_URL_PERCEPTION:
                     _stream_status(stream, _url_evidence_status_label(), _runtime_model_detail(config))
@@ -1848,7 +1854,10 @@ class SpiceTUIShell:
             )
             if self._block_for_pre_run_evidence_gate(gate, status=status):
                 return True
-            if self._block_if_required_evidence_is_still_missing(gate, status=status):
+            if (
+                gate.action != PRE_RUN_EVIDENCE_RUN_URL_PERCEPTION
+                and self._block_if_required_evidence_is_still_missing(gate, status=status)
+            ):
                 return True
             if gate.should_run_url_perception or gate.action == PRE_RUN_EVIDENCE_RUN_URL_PERCEPTION:
                 status.update(_url_evidence_status_label(), _runtime_model_detail(config))
