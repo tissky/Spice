@@ -309,8 +309,9 @@ def _build_simulation_prompt(
             "instruction": (
                 "Use compiled_context as the source of truth for simulation. "
                 "It contains current_intent, candidate_decisions, active_decision_frame, "
-                "recent decisions, executor affordance, assumptions, evaluation axes, "
-                "historical analogs, and retrieved memory. Use state_summary only when "
+                "recent decisions, executor affordance, workspace/url/delegated perception "
+                "context, assumptions, evaluation axes, historical analogs, and retrieved "
+                "memory. Use state_summary only when "
                 "compiled_context is empty or missing a specific field."
             ),
         },
@@ -387,8 +388,13 @@ def _compact_simulation_context_for_prompt(context_payload: dict[str, Any]) -> d
         "recent_decisions": _take_dicts(context_payload.get("recent_decisions"), 6),
         "recent_approvals": _take_dicts(context_payload.get("recent_approvals"), 6),
         "executor_affordance": _dict(context_payload.get("executor_affordance")),
+        "executor_capabilities": _dict(context_payload.get("executor_capabilities")),
         "session_summary": _dict(context_payload.get("session_summary")),
         "workspace_context": _dict(context_payload.get("workspace_context")),
+        "url_context": _dict(context_payload.get("url_context")),
+        "delegated_perception_context": _dict(
+            context_payload.get("delegated_perception_context")
+        ),
         "assumptions": _take_dicts(context_payload.get("assumptions"), 8),
         "evaluation_axes": _take_dicts(context_payload.get("evaluation_axes"), 8),
         "historical_analogs": _take_dicts(context_payload.get("historical_analogs"), 8),
@@ -468,8 +474,9 @@ def _system_prompt(display_language: str = "en") -> str:
         "Return only a JSON object. Do not select a winner. Do not execute. "
         "Use compiled_context as the primary simulation context. Consult "
         "current_intent, candidate_decisions, active_decision_frame, recent_decisions, "
-        "executor_affordance, assumptions, evaluation_axes, historical_analogs, and "
-        "retrieved_memory before using legacy state_summary. "
+        "executor_affordance, workspace_context, url_context, delegated_perception_context, "
+        "assumptions, evaluation_axes, historical_analogs, and retrieved_memory before "
+        "using legacy state_summary. "
         "Do not change candidate IDs. Provide at most one simulation per candidate. "
         "For each candidate, return only these fields: candidate_id, expected_outcome, "
         "downside, success_signal, and confidence. Compress likely risks, trade-offs, "

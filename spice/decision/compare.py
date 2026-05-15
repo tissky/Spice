@@ -328,10 +328,12 @@ def _render_execution_affordance(affordance: Mapping[str, Any]) -> str:
             return (
                 "advisory only; no executor handoff requested; "
                 f"executor={executor_id}; approval not required"
+                f"{_capability_detail_suffix(affordance, advisory=True)}"
             )
         return (
             f"handoff unavailable ({reason or 'not approval eligible'}); "
             f"executor={executor_id}; permission={configured}->{required}; approval not available"
+            f"{_capability_detail_suffix(affordance, missing=True)}"
         )
     approval_text = "approval required" if approval.get("required") else "approval not required"
     if affordance.get("blocked"):
@@ -339,11 +341,52 @@ def _render_execution_affordance(affordance: Mapping[str, Any]) -> str:
         return (
             f"handoff blocked ({reason}); executor={executor_id}; "
             f"permission={configured}->{required}; {approval_text}"
+            f"{_capability_detail_suffix(affordance, missing=True)}"
         )
     return (
         f"ready for approval via {executor_id}; "
         f"permission={configured}->{required}; {approval_text}"
+        f"{_capability_detail_suffix(affordance)}"
     )
+
+
+def _capability_detail_suffix(
+    affordance: Mapping[str, Any],
+    *,
+    advisory: bool = False,
+    missing: bool = False,
+) -> str:
+    capability = affordance.get("capability") or {}
+    if not isinstance(capability, Mapping):
+        capability = {}
+    required = str(
+        capability.get("required_capability")
+        or affordance.get("required_capability")
+        or ""
+    ).strip()
+    source = str(
+        capability.get("source")
+        or affordance.get("executor_capability_source")
+        or ""
+    ).strip()
+    matched = str(capability.get("matched_capability") or "").strip()
+    limitations = [
+        str(item).strip()
+        for item in (capability.get("limitations") or [])
+        if str(item).strip()
+    ]
+    parts: list[str] = []
+    if required and not advisory:
+        if missing or not capability.get("executor_has_required_capability"):
+            parts.append(f"missing capability={required}")
+        else:
+            matched_text = f" matched={matched}" if matched else ""
+            parts.append(f"required_capability={required}{matched_text}")
+    if source:
+        parts.append(f"capability_source={source}")
+    if limitations:
+        parts.append("limitations=" + "; ".join(limitations[:2]))
+    return "; " + "; ".join(parts) if parts else ""
 
 
 def _render_skill_resolution(skill_resolution: Mapping[str, Any]) -> str:

@@ -5,6 +5,7 @@ from typing import Any
 from spice.decision.general.candidates import (
     GenericExecutionIntent,
     GenericCandidate,
+    crosses_execution_approval_boundary,
     is_approval_eligible_executable_candidate,
 )
 from spice.decision.general.permissions import (
@@ -15,6 +16,10 @@ from spice.runtime.executor_runtime import (
     ResolvedExecutorRuntime,
     resolve_executor_runtime_from_config,
 )
+from spice.runtime.executor_capabilities import (
+    ExecutorCapabilitySnapshot,
+    unavailable_executor_capability_snapshot,
+)
 from spice.runtime.workspace import SpiceWorkspaceConfig
 
 
@@ -23,13 +28,19 @@ def annotate_execution_affordances(
     *,
     config: SpiceWorkspaceConfig | dict[str, Any],
 ) -> list[GenericCandidate]:
+    config_payload = _config_payload(config)
     runtime = (
         resolve_executor_runtime_from_config(config)
         if isinstance(config, SpiceWorkspaceConfig)
         else resolve_executor_runtime_from_config(SpiceWorkspaceConfig.from_payload(config))
     )
+    executor_capabilities = _executor_capabilities_from_config(config_payload, runtime=runtime)
     return [
-        _annotate_candidate(candidate, runtime=runtime)
+        _annotate_candidate(
+            candidate,
+            runtime=runtime,
+            executor_capabilities=executor_capabilities,
+        )
         for candidate in candidates
     ]
 
@@ -38,9 +49,19 @@ def build_execution_affordance(
     candidate: GenericCandidate,
     *,
     executor_runtime: ResolvedExecutorRuntime,
+    executor_capabilities: ExecutorCapabilitySnapshot | dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     requirement = infer_executor_permission_requirement(candidate)
-    candidate_eligible = is_approval_eligible_executable_candidate(candidate)
+    candidate_eligible_without_capability = is_approval_eligible_executable_candidate(candidate)
+    capability_check = _capability_check(
+        candidate,
+        executor_capabilities,
+        runtime=executor_runtime,
+    )
+    candidate_eligible = bool(
+        candidate_eligible_without_capability
+        and not capability_check["blocked"]
+    )
     executor_ready = executor_runtime.status == "ready"
     escalation_required = permission_exceeds(
         requirement.required_permission,
@@ -51,6 +72,8 @@ def build_execution_affordance(
         or executor_runtime.permission_enforcement == "command_flag"
     )
     blockers = _candidate_execution_blockers(candidate)
+    if candidate_eligible_without_capability:
+        blockers.extend(capability_check["blockers"])
     if not executor_ready:
         blockers.append(executor_runtime.detail or f"{executor_runtime.executor_id} is not ready.")
     if escalation_required and not escalation_supported:
@@ -58,7 +81,7 @@ def build_execution_affordance(
             f"Executor permission escalation to {requirement.required_permission} is not automated."
         )
     approval_required = bool(
-        candidate_eligible
+        candidate_eligible_without_capability
         and (candidate.requires_confirmation or executor_runtime.approval_required)
     )
     executable = bool(candidate_eligible and executor_ready and escalation_supported)
@@ -66,11 +89,24 @@ def build_execution_affordance(
         "schema_version": "0.1",
         "generated_by": "spice.runtime.execution_affordance",
         "candidate_executable": candidate_eligible,
+        "candidate_execution_requested": candidate_eligible_without_capability,
         "executor_available": executor_ready,
         "executable": executable,
         "blocked": bool(blockers),
         "blocked_reason": blockers[0] if blockers else "",
         "blockers": blockers,
+        "required_capability": capability_check["required_capability"],
+        "executor_capability_source": capability_check["executor_capability_source"],
+        "capability": {
+            "required_capability": capability_check["required_capability"],
+            "executor_has_required_capability": capability_check["executor_has_required_capability"],
+            "source": capability_check["executor_capability_source"],
+            "status": capability_check["executor_capability_status"],
+            "available_capability_ids": capability_check["available_capability_ids"],
+            "limitations": capability_check["executor_capability_limitations"],
+            "simulates_required_capability": capability_check["simulates_required_capability"],
+            "matched_capability": capability_check["matched_capability"],
+        },
         "executor": {
             "executor_id": executor_runtime.executor_id,
             "requested_executor_id": executor_runtime.requested_executor_id,
@@ -108,14 +144,130 @@ def _annotate_candidate(
     candidate: GenericCandidate,
     *,
     runtime: ResolvedExecutorRuntime,
+    executor_capabilities: ExecutorCapabilitySnapshot,
 ) -> GenericCandidate:
     metadata = dict(candidate.metadata or {})
     metadata["execution_affordance"] = build_execution_affordance(
         candidate,
         executor_runtime=runtime,
+        executor_capabilities=executor_capabilities,
     )
     candidate.metadata = metadata
     return candidate
+
+
+def _capability_check(
+    candidate: GenericCandidate,
+    executor_capabilities: ExecutorCapabilitySnapshot | dict[str, Any] | None,
+    *,
+    runtime: ResolvedExecutorRuntime,
+) -> dict[str, Any]:
+    snapshot = _coerce_capability_snapshot(executor_capabilities, runtime=runtime)
+    required_capability = str(getattr(candidate, "required_capability", "") or "").strip()
+    capability_ids = [str(item).strip() for item in snapshot.capability_ids if str(item).strip()]
+    capability_id_set = set(capability_ids)
+    execution_requested = _candidate_requests_execution(candidate)
+    exact_match = bool(required_capability and required_capability in capability_id_set)
+    general_match = bool(
+        required_capability
+        and not exact_match
+        and "general_execution" in capability_id_set
+    )
+    simulates_required = bool(
+        required_capability
+        and not runtime.real_executor
+        and "simulate_execution" in capability_id_set
+    )
+    has_required = (
+        not required_capability
+        or exact_match
+        or general_match
+        or simulates_required
+    )
+    blockers: list[str] = []
+    if execution_requested and required_capability and not has_required:
+        blockers.append(f"Executor lacks required capability: {required_capability}")
+    return {
+        "required_capability": required_capability,
+        "executor_capability_source": snapshot.source,
+        "executor_capability_status": snapshot.status,
+        "available_capability_ids": capability_ids,
+        "executor_capability_limitations": list(snapshot.limitations),
+        "executor_has_required_capability": bool(has_required),
+        "simulates_required_capability": simulates_required,
+        "matched_capability": _matched_capability(
+            required_capability,
+            exact_match=exact_match,
+            general_match=general_match,
+            simulates_required=simulates_required,
+        ),
+        "blocked": bool(blockers),
+        "blockers": blockers,
+    }
+
+
+def _matched_capability(
+    required_capability: str,
+    *,
+    exact_match: bool,
+    general_match: bool,
+    simulates_required: bool,
+) -> str:
+    if not required_capability:
+        return ""
+    if exact_match:
+        return required_capability
+    if general_match:
+        return "general_execution"
+    if simulates_required:
+        return "simulate_execution"
+    return ""
+
+
+def _candidate_requests_execution(candidate: GenericCandidate) -> bool:
+    execution_intent = getattr(candidate, "execution_intent", GenericExecutionIntent())
+    return bool(
+        execution_intent.intent_class == "execution_requested"
+        and execution_intent.requested
+    )
+
+
+def _executor_capabilities_from_config(
+    payload: dict[str, Any],
+    *,
+    runtime: ResolvedExecutorRuntime,
+) -> ExecutorCapabilitySnapshot:
+    raw = payload.get("executor_capabilities")
+    return _coerce_capability_snapshot(raw, runtime=runtime)
+
+
+def _coerce_capability_snapshot(
+    raw: ExecutorCapabilitySnapshot | dict[str, Any] | None,
+    *,
+    runtime: ResolvedExecutorRuntime,
+) -> ExecutorCapabilitySnapshot:
+    if isinstance(raw, ExecutorCapabilitySnapshot):
+        return raw
+    if isinstance(raw, dict) and raw:
+        try:
+            return ExecutorCapabilitySnapshot.from_payload(raw)
+        except (TypeError, ValueError):
+            return unavailable_executor_capability_snapshot(
+                runtime.executor_id,
+                provider=runtime.executor_id,
+                reason="Executor capability snapshot is malformed.",
+            )
+    return unavailable_executor_capability_snapshot(
+        runtime.executor_id,
+        provider=runtime.executor_id,
+        reason="Executor capability snapshot is unavailable.",
+    )
+
+
+def _config_payload(config: SpiceWorkspaceConfig | dict[str, Any]) -> dict[str, Any]:
+    if isinstance(config, SpiceWorkspaceConfig):
+        return dict(config.to_payload())
+    return dict(config or {})
 
 
 def _candidate_execution_blockers(candidate: GenericCandidate) -> list[str]:
@@ -127,6 +279,10 @@ def _candidate_execution_blockers(candidate: GenericCandidate) -> list[str]:
     if execution_intent.intent_class != "execution_requested":
         blockers.append(
             "Candidate is advisory; execution_intent.intent_class is not execution_requested."
+        )
+    if not crosses_execution_approval_boundary(candidate):
+        blockers.append(
+            "Candidate is read-only perception or does not cross an execution approval boundary."
         )
     if not execution_intent.requested:
         blockers.append("Candidate execution_intent.requested is false.")

@@ -15,7 +15,7 @@ def render_execution_panel(artifact: dict[str, Any], rendered_text: str) -> Any:
     except ImportError:
         return rendered_text
 
-    provider = str(artifact.get("executor_provider") or "executor")
+    provider = str(artifact.get("executor_provider") or ("dry_run" if artifact.get("dry_run") else "executor"))
     title = "DRY-RUN EXECUTION" if provider == "dry_run" else "EXECUTION RESULT"
     status_style = _status_style(str(artifact.get("task_status") or artifact.get("protocol_status") or ""))
 

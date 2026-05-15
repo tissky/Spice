@@ -868,9 +868,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     config_set = config_subparsers.add_parser(
         "set",
-        help="Set one flat workspace config key.",
+        help="Set one workspace config key.",
     )
-    config_set.add_argument("key", help="Config key, such as executor or executor_command.")
+    config_set.add_argument(
+        "key",
+        help="Config key, such as executor, executor_command, or workspace_perception.depth.",
+    )
     config_set.add_argument("value", help="Config value.")
     config_set.add_argument(
         "--workspace",
@@ -1574,7 +1577,7 @@ def _handle_config_set(args: argparse.Namespace) -> int:
         if bool(args.json):
             print(json.dumps(payload, indent=2, sort_keys=True))
         else:
-            print(f"Set {args.key} = {getattr(config, args.key)}")
+            print(f"Set {args.key} = {_lookup_config_payload_value(payload, args.key)}")
         return 0
     except Exception as exc:
         _print_cli_error("config set", exc, workspace=args.workspace)
@@ -1621,6 +1624,15 @@ def _llm_api_key_env_name(provider: str) -> str:
     }.get(provider, "")
 
 
+def _lookup_config_payload_value(payload: dict[str, object], key: str) -> object:
+    current: object = payload
+    for part in key.split("."):
+        if not isinstance(current, dict):
+            return ""
+        current = current.get(part, "")
+    return current
+
+
 def _render_workspace_config(payload: dict[str, object]) -> str:
     keys = [
         "llm_provider",
@@ -1642,13 +1654,18 @@ def _render_workspace_config(payload: dict[str, object]) -> str:
         "openchronicle_since_minutes",
         "openchronicle_context_limit",
         "perception_trigger_mode",
+        "workspace_perception.depth",
+        "workspace_perception.max_rounds",
+        "workspace_perception.max_tool_calls",
+        "workspace_perception.max_files_read",
+        "workspace_perception.total_char_budget",
         "store",
         "active_session_id",
     ]
     width = max(len(key) for key in keys) + 2
     lines = ["Spice Workspace Config", ""]
     for key in keys:
-        value = payload.get(key)
+        value = _lookup_config_payload_value(payload, key)
         rendered = "" if value is None else str(value)
         lines.append(f"{key.ljust(width, '.')} {rendered}")
     runtime = payload.get("resolved_executor_runtime")

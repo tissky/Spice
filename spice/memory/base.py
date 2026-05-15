@@ -81,6 +81,10 @@ class ContextCompiler(ABC):
         active_decision_frame: dict[str, Any] | None = None,
         session: dict[str, Any] | None = None,
         config: dict[str, Any] | None = None,
+        workspace_context: dict[str, Any] | None = None,
+        url_context: dict[str, Any] | None = None,
+        delegated_perception_context: dict[str, Any] | None = None,
+        evidence_context: dict[str, Any] | None = None,
         recent_history: list[ProtocolRecord] | None = None,
         domain: str = "general",
     ) -> DecisionContext:
@@ -99,6 +103,10 @@ class ContextCompiler(ABC):
         active_decision_frame: dict[str, Any] | None = None,
         session: dict[str, Any] | None = None,
         config: dict[str, Any] | None = None,
+        workspace_context: dict[str, Any] | None = None,
+        url_context: dict[str, Any] | None = None,
+        delegated_perception_context: dict[str, Any] | None = None,
+        evidence_context: dict[str, Any] | None = None,
         recent_history: list[ProtocolRecord] | None = None,
         domain: str = "general",
     ) -> SimulationContext:
@@ -119,6 +127,10 @@ class ContextCompiler(ABC):
         active_decision_frame: dict[str, Any] | None = None,
         session: dict[str, Any] | None = None,
         config: dict[str, Any] | None = None,
+        workspace_context: dict[str, Any] | None = None,
+        url_context: dict[str, Any] | None = None,
+        delegated_perception_context: dict[str, Any] | None = None,
+        evidence_context: dict[str, Any] | None = None,
         recent_history: list[ProtocolRecord] | None = None,
         domain: str = "general",
     ) -> ReflectionContext:

@@ -37,7 +37,7 @@ This creates:
 For the polished interactive shell, install the optional TUI extra:
 
 ```sh
-pip install "spice-runtime[tui]"
+pip install spice-runtime
 ```
 
 ## 2. Run One Manual Intent

@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+from collections.abc import Iterator
 from dataclasses import replace
 
 from spice.llm.core.registry import ProviderRegistry
 from spice.llm.core.router import LLMModelConfigOverride, LLMRouter
 from spice.llm.core.task_hooks import LLMTaskHook
-from spice.llm.core.types import LLMModelConfig, LLMRequest, LLMResponse
+from spice.llm.core.types import LLMModelConfig, LLMRequest, LLMResponse, LLMStreamChunk
 
 
 class LLMClient:
@@ -48,6 +49,24 @@ class LLMClient:
         )
         provider = self._registry.resolve(dispatch_model.provider_id)
         return provider.generate(request, dispatch_model)
+
+    def stream(
+        self,
+        request: LLMRequest,
+        *,
+        model_override: LLMModelConfigOverride | None = None,
+    ) -> Iterator[LLMStreamChunk]:
+        base_model = self.resolve_model_config(
+            request.task_hook,
+            domain=request.domain,
+            model_override=model_override,
+        )
+        dispatch_model = self.resolve_dispatch_config(
+            request=request,
+            base_model=base_model,
+        )
+        provider = self._registry.resolve(dispatch_model.provider_id)
+        return provider.stream(request, dispatch_model)
 
     def resolve_dispatch_config(
         self,

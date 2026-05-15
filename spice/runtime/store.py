@@ -46,6 +46,12 @@ class LocalJsonStore:
     def load_approval(self, approval_id: str) -> dict[str, Any]:
         return self._load_record(self.paths.approvals_dir, approval_id)
 
+    def save_investigation_consent(self, consent_id: str, payload: dict[str, Any]) -> Path:
+        return self._save_record(self.paths.investigations_dir, consent_id, payload)
+
+    def load_investigation_consent(self, consent_id: str) -> dict[str, Any]:
+        return self._load_record(self.paths.investigations_dir, consent_id)
+
     def save_outcome(self, outcome_id: str, payload: dict[str, Any]) -> Path:
         return self._save_record(self.paths.outcomes_dir, outcome_id, payload)
 
@@ -57,6 +63,12 @@ class LocalJsonStore:
 
     def load_perception(self, perception_id: str) -> dict[str, Any]:
         return self._load_record(self.paths.perceptions_dir, perception_id)
+
+    def save_conversation_turn(self, turn_id: str, payload: dict[str, Any]) -> Path:
+        return self._save_record(self.paths.conversations_dir, turn_id, payload)
+
+    def load_conversation_turn(self, turn_id: str) -> dict[str, Any]:
+        return self._load_record(self.paths.conversations_dir, turn_id)
 
     def list_record_ids(self, kind: str) -> list[str]:
         directory = self._directory_for_kind(kind)
@@ -96,10 +108,18 @@ class LocalJsonStore:
             "decisions": self.paths.decisions_dir,
             "approval": self.paths.approvals_dir,
             "approvals": self.paths.approvals_dir,
+            "investigation": self.paths.investigations_dir,
+            "investigations": self.paths.investigations_dir,
+            "investigation_consent": self.paths.investigations_dir,
+            "investigation_consents": self.paths.investigations_dir,
             "outcome": self.paths.outcomes_dir,
             "outcomes": self.paths.outcomes_dir,
             "perception": self.paths.perceptions_dir,
             "perceptions": self.paths.perceptions_dir,
+            "conversation": self.paths.conversations_dir,
+            "conversations": self.paths.conversations_dir,
+            "conversation_turn": self.paths.conversations_dir,
+            "conversation_turns": self.paths.conversations_dir,
         }
         try:
             return mapping[kind]

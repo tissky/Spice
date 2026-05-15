@@ -7,16 +7,21 @@ name = "spice-runtime"
 version = "0.2.0"
 description = "Spice core runtime framework"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 authors = [{ name = "Spice Contributors" }]
 license = { text = "MIT" }
 classifiers = [
   "Programming Language :: Python :: 3",
-  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
   "License :: OSI Approved :: MIT License",
   "Operating System :: OS Independent",
 ]
-dependencies = []
+dependencies = [
+  "prompt_toolkit>=3.0",
+  "rich>=13.0",
+]
 
 [project.optional-dependencies]
 tui = ["prompt_toolkit>=3.0", "rich>=13.0"]

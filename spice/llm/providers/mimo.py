@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+from collections.abc import Iterator
 from dataclasses import dataclass
 from uuid import uuid4
 
@@ -9,12 +10,13 @@ from spice.llm.core.provider import (
     LLMProvider,
     LLMResponseError,
 )
-from spice.llm.core.types import LLMModelConfig, LLMRequest, LLMResponse
+from spice.llm.core.types import LLMModelConfig, LLMRequest, LLMResponse, LLMStreamChunk
 from spice.llm.providers.chat_completions import (
     build_chat_payload,
     chat_completions_endpoint,
     extract_choice,
     post_chat_completions,
+    stream_chat_completions,
 )
 
 
@@ -74,6 +76,38 @@ class MiMoLLMProvider(LLMProvider):
             usage=usage,
             latency_ms=latency_ms,
             request_id=str(parsed.get("id") or f"mimo-{uuid4().hex}"),
+        )
+
+    def stream(
+        self,
+        request: LLMRequest,
+        model: LLMModelConfig,
+    ) -> Iterator[LLMStreamChunk]:
+        api_key = _resolve_api_key(self.api_key_env)
+        if not api_key:
+            env_names = " or ".join(MIMO_API_KEY_ENV_ALIASES)
+            raise LLMAuthError(f"{env_names} is required for MiMo/Xiaomi provider.")
+        if not model.model_id.strip():
+            raise LLMResponseError("MiMo model_id is required.")
+
+        endpoint = chat_completions_endpoint(
+            _resolve_base_url(self.base_url_env),
+            MIMO_DEFAULT_BASE_URL,
+        )
+        timeout_sec = model.timeout_sec if model.timeout_sec is not None else request.timeout_sec
+        return stream_chat_completions(
+            provider_label="MiMo",
+            endpoint=endpoint,
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            },
+            payload=build_chat_payload(
+                request=request,
+                model=model,
+                max_tokens_field="max_completion_tokens",
+            ),
+            timeout_sec=timeout_sec,
         )
 
 

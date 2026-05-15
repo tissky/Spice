@@ -113,6 +113,12 @@ def _default_output_for_hook(request: LLMRequest) -> str:
         ]
         return json.dumps(payload, ensure_ascii=True)
 
+    if hook == LLMTaskHook.RESPONSE_COMPOSE:
+        payload = {
+            "response": "Decision brief\nI'd choose the selected option.\n\nThis deterministic provider does not rewrite response text."
+        }
+        return json.dumps(payload, ensure_ascii=True)
+
     if hook == LLMTaskHook.SIMULATION_ADVISE:
         payload = {"score": 0.0, "summary": "deterministic simulation artifact"}
         return json.dumps(payload, ensure_ascii=True)

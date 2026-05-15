@@ -14,6 +14,7 @@ from spice.decision.general.candidates import (
     RiskProfile,
 )
 from spice.llm.decision_proposal import LLMDecisionProposal
+from spice.llm.read_only_intent_boundary import is_read_only_perception_decision_mode
 
 
 def normalize_decision_proposal(
@@ -38,10 +39,16 @@ def normalize_decision_proposal(
     execution_requested = bool(proposal.execution_requested)
     if execution_requested_default and proposal.handoff_task:
         execution_requested = True
+    read_only_boundary_applied = False
+    if is_read_only_perception_decision_mode(decision_mode):
+        execution_requested = False
+        read_only_boundary_applied = True
 
     action_type = "intent.execute" if execution_requested else "item.triage"
     handoff_task = proposal.handoff_task.strip()
-    if execution_requested and not handoff_task:
+    if read_only_boundary_applied:
+        handoff_task = ""
+    elif execution_requested and not handoff_task:
         handoff_task = proposal.recommendation or proposal.title
 
     side_effect_class = "external_effect" if execution_requested else "read_only"
@@ -59,6 +66,7 @@ def normalize_decision_proposal(
         metadata={
             "source": "llm_decision_proposal",
             "decision_mode": decision_mode,
+            "read_only_intent_boundary_applied": read_only_boundary_applied,
         },
     )
     target_refs: list[str] = []
@@ -100,6 +108,7 @@ def normalize_decision_proposal(
         "confidence": proposal.confidence,
         "risk_level": proposal.risk_level,
         "executor_task": handoff_task,
+        "read_only_intent_boundary_applied": read_only_boundary_applied,
     }
     if proposal.explicit_option_index is not None:
         metadata["explicit_option_index"] = proposal.explicit_option_index

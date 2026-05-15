@@ -5,6 +5,7 @@ from typing import Any
 
 from spice.memory.base import ContextCompiler, MemoryProvider
 from spice.memory.context import DecisionContext, ReflectionContext, SimulationContext
+from spice.perception import build_evidence_context
 from spice.protocols import Decision, ExecutionIntent, ExecutionResult, Outcome, ProtocolRecord, WorldState
 
 
@@ -190,11 +191,26 @@ class DeterministicContextCompiler(ContextCompiler):
         active_decision_frame: dict[str, Any] | None = None,
         session: dict[str, Any] | None = None,
         config: dict[str, Any] | None = None,
+        workspace_context: dict[str, Any] | None = None,
+        url_context: dict[str, Any] | None = None,
+        delegated_perception_context: dict[str, Any] | None = None,
+        evidence_context: dict[str, Any] | None = None,
         recent_history: list[ProtocolRecord] | None = None,
         domain: str = "general",
     ) -> DecisionContext:
         recent_history = recent_history or []
         frame = self._active_decision_frame(general_state, active_decision_frame)
+        workspace_context_payload = self._workspace_context(config, workspace_context)
+        url_context_payload = self._url_context(url_context)
+        delegated_context_payload = self._delegated_perception_context(
+            delegated_perception_context
+        )
+        evidence_context_payload = self._evidence_context(
+            evidence_context,
+            workspace_context=workspace_context_payload,
+            url_context=url_context_payload,
+            delegated_perception_context=delegated_context_payload,
+        )
         retrieved = self._query_general_memory(domain, "decision")
         refs = self._build_refs(
             state,
@@ -258,8 +274,12 @@ class DeterministicContextCompiler(ContextCompiler):
                 ),
             ][: self.recent_outcomes_limit],
             executor_affordance=self._executor_affordance(frame, config),
+            executor_capabilities=self._executor_capabilities(config),
             session_summary=self._session_summary(session, domain=domain),
-            workspace_context=self._workspace_context(config),
+            workspace_context=workspace_context_payload,
+            url_context=url_context_payload,
+            delegated_perception_context=delegated_context_payload,
+            evidence_context=evidence_context_payload,
             retrieved_memory=retrieved,
             warnings=self._general_warnings(state, general_state),
             metadata={"general_state": self._general_state_summary(general_state)},
@@ -275,6 +295,10 @@ class DeterministicContextCompiler(ContextCompiler):
         active_decision_frame: dict[str, Any] | None = None,
         session: dict[str, Any] | None = None,
         config: dict[str, Any] | None = None,
+        workspace_context: dict[str, Any] | None = None,
+        url_context: dict[str, Any] | None = None,
+        delegated_perception_context: dict[str, Any] | None = None,
+        evidence_context: dict[str, Any] | None = None,
         recent_history: list[ProtocolRecord] | None = None,
         domain: str = "general",
     ) -> SimulationContext:
@@ -287,8 +311,23 @@ class DeterministicContextCompiler(ContextCompiler):
             active_decision_frame=frame,
             session=session,
             config=config,
+            workspace_context=workspace_context,
+            url_context=url_context,
+            delegated_perception_context=delegated_perception_context,
+            evidence_context=evidence_context,
             recent_history=recent_history,
             domain=domain,
+        )
+        workspace_context_payload = self._workspace_context(config, workspace_context)
+        url_context_payload = self._url_context(url_context)
+        delegated_context_payload = self._delegated_perception_context(
+            delegated_perception_context
+        )
+        evidence_context_payload = self._evidence_context(
+            evidence_context,
+            workspace_context=workspace_context_payload,
+            url_context=url_context_payload,
+            delegated_perception_context=delegated_context_payload,
         )
         retrieved = self._query_general_memory(domain, "simulation")
         decision_candidates = self._serialize_list(candidates or [], self.candidate_limit)
@@ -318,8 +357,12 @@ class DeterministicContextCompiler(ContextCompiler):
             recent_decisions=self._recent_decisions(general_state),
             recent_approvals=self._recent_approvals(general_state),
             executor_affordance=self._executor_affordance(frame, config),
+            executor_capabilities=self._executor_capabilities(config),
             session_summary=self._session_summary(session, domain=domain),
-            workspace_context=self._workspace_context(config),
+            workspace_context=workspace_context_payload,
+            url_context=url_context_payload,
+            delegated_perception_context=delegated_context_payload,
+            evidence_context=evidence_context_payload,
             assumptions=[
                 {
                     "id": "decision_relevant_state",
@@ -349,11 +392,26 @@ class DeterministicContextCompiler(ContextCompiler):
         active_decision_frame: dict[str, Any] | None = None,
         session: dict[str, Any] | None = None,
         config: dict[str, Any] | None = None,
+        workspace_context: dict[str, Any] | None = None,
+        url_context: dict[str, Any] | None = None,
+        delegated_perception_context: dict[str, Any] | None = None,
+        evidence_context: dict[str, Any] | None = None,
         recent_history: list[ProtocolRecord] | None = None,
         domain: str = "general",
     ) -> ReflectionContext:
         recent_history = recent_history or []
         frame = self._active_decision_frame(general_state, active_decision_frame)
+        workspace_context_payload = self._workspace_context(config, workspace_context)
+        url_context_payload = self._url_context(url_context)
+        delegated_context_payload = self._delegated_perception_context(
+            delegated_perception_context
+        )
+        evidence_context_payload = self._evidence_context(
+            evidence_context,
+            workspace_context=workspace_context_payload,
+            url_context=url_context_payload,
+            delegated_perception_context=delegated_context_payload,
+        )
         outcome_payload = self._serialize_record(outcome)
         retrieved = self._query_general_memory(domain, "reflection")
         refs = self._build_refs(
@@ -388,8 +446,12 @@ class DeterministicContextCompiler(ContextCompiler):
             recent_decisions=self._recent_decisions(general_state),
             recent_approvals=self._recent_approvals(general_state),
             executor_affordance=self._executor_affordance(frame, config),
+            executor_capabilities=self._executor_capabilities(config),
             session_summary=self._session_summary(session, domain=domain),
-            workspace_context=self._workspace_context(config),
+            workspace_context=workspace_context_payload,
+            url_context=url_context_payload,
+            delegated_perception_context=delegated_context_payload,
+            evidence_context=evidence_context_payload,
             executed_path={
                 "decision": dict(decision_artifact or {}),
                 "execution": dict(execution_artifact or {}),
@@ -486,18 +548,27 @@ class DeterministicContextCompiler(ContextCompiler):
         namespaces_by_stage = {
             "decision": [
                 f"{domain}.decision",
+                f"{domain}.evolution",
+                f"{domain}.workspace_perception",
+                f"{domain}.delegated_perception",
                 f"{domain}.preference",
                 f"{domain}.reflection",
             ],
             "simulation": [
                 f"{domain}.simulation",
                 f"{domain}.decision",
+                f"{domain}.evolution",
+                f"{domain}.workspace_perception",
+                f"{domain}.delegated_perception",
                 f"{domain}.preference",
                 f"{domain}.reflection",
             ],
             "reflection": [
                 f"{domain}.reflection",
                 f"{domain}.decision",
+                f"{domain}.evolution",
+                f"{domain}.workspace_perception",
+                f"{domain}.delegated_perception",
                 f"{domain}.preference",
             ],
         }
@@ -612,6 +683,24 @@ class DeterministicContextCompiler(ContextCompiler):
             if key in config
         }
 
+    @staticmethod
+    def _executor_capabilities(config: dict[str, Any] | None) -> dict[str, Any]:
+        if not isinstance(config, dict):
+            return {}
+        value = config.get("executor_capabilities")
+        if isinstance(value, dict):
+            return dict(value)
+        executor = str(config.get("executor") or "").strip()
+        if not executor:
+            return {}
+        return {
+            "executor_id": executor,
+            "source": "config_hint",
+            "capability_ids": [],
+            "summary": "Executor capability snapshot was not provided to the context compiler.",
+            "limitations": ["No compact executor capability snapshot was attached to config."],
+        }
+
     def _session_summary(self, session: dict[str, Any] | None, *, domain: str = "general") -> dict[str, Any]:
         if not isinstance(session, dict):
             summary: dict[str, Any] = {}
@@ -669,30 +758,67 @@ class DeterministicContextCompiler(ContextCompiler):
             "open_threads": list(record.get("open_threads")) if isinstance(record.get("open_threads"), list) else [],
         }
 
-    def _workspace_context(self, config: dict[str, Any] | None) -> dict[str, Any]:
+    def _workspace_context(
+        self,
+        config: dict[str, Any] | None,
+        workspace_context: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         if not isinstance(config, dict):
-            return {}
-        keys = (
-            "llm_provider",
-            "llm_model",
-            "llm_candidate_expand",
-            "llm_simulation",
-            "executor",
-            "executor_provider",
-            "executor_permission",
-            "executor_transport",
-            "perception_provider",
-            "memory_provider",
-            "memory_path",
-            "context_compiler",
-            "memory_summary_provider",
-            "memory_summary_llm_min_new_records",
-            "memory_summary_trigger_chars",
-            "memory_summary_target_chars",
-        )
-        context = {key: config[key] for key in keys if key in config}
-        context["skill_catalog"] = _runtime_skill_catalog_summary(config)
+            context: dict[str, Any] = {}
+        else:
+            keys = (
+                "llm_provider",
+                "llm_model",
+                "llm_candidate_expand",
+                "llm_simulation",
+                "executor",
+                "executor_provider",
+                "executor_permission",
+                "executor_transport",
+                "perception_provider",
+                "memory_provider",
+                "memory_path",
+                "context_compiler",
+                "memory_summary_provider",
+                "memory_summary_llm_min_new_records",
+                "memory_summary_trigger_chars",
+                "memory_summary_target_chars",
+            )
+            context = {key: config[key] for key in keys if key in config}
+            context["skill_catalog"] = _runtime_skill_catalog_summary(config)
+        if isinstance(workspace_context, dict):
+            context.update(dict(workspace_context))
         return context
+
+    @staticmethod
+    def _url_context(url_context: dict[str, Any] | None = None) -> dict[str, Any]:
+        return dict(url_context) if isinstance(url_context, dict) else {}
+
+    @staticmethod
+    def _delegated_perception_context(
+        delegated_perception_context: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        return (
+            dict(delegated_perception_context)
+            if isinstance(delegated_perception_context, dict)
+            else {}
+        )
+
+    @staticmethod
+    def _evidence_context(
+        evidence_context: dict[str, Any] | None = None,
+        *,
+        workspace_context: dict[str, Any] | None = None,
+        url_context: dict[str, Any] | None = None,
+        delegated_perception_context: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        if isinstance(evidence_context, dict) and evidence_context:
+            return dict(evidence_context)
+        return build_evidence_context(
+            workspace_context=workspace_context,
+            url_context=url_context,
+            delegated_perception_context=delegated_perception_context,
+        )
 
     def _recent_decisions(self, general_state: Any) -> list[dict[str, Any]]:
         decisions = self._state_payload_list(

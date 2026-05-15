@@ -4,6 +4,7 @@ import json
 import time
 import urllib.error as urllib_error
 import urllib.request as urllib_request
+from collections.abc import Iterator
 from typing import Any
 
 from spice.llm.core.provider import (
@@ -12,7 +13,7 @@ from spice.llm.core.provider import (
     LLMResponseError,
     LLMTransportError,
 )
-from spice.llm.core.types import LLMModelConfig, LLMRequest
+from spice.llm.core.types import LLMModelConfig, LLMRequest, LLMStreamChunk
 
 
 def build_chat_payload(
@@ -81,6 +82,88 @@ def post_chat_completions(
     return parse_response_json(response_body, provider_label=provider_label), latency_ms
 
 
+def stream_chat_completions(
+    *,
+    provider_label: str,
+    endpoint: str,
+    headers: dict[str, str],
+    payload: dict[str, Any],
+    timeout_sec: float | None,
+) -> Iterator[LLMStreamChunk]:
+    stream_payload = dict(payload)
+    stream_payload["stream"] = True
+    body = json.dumps(stream_payload, ensure_ascii=True).encode("utf-8")
+    http_request = urllib_request.Request(
+        endpoint,
+        data=body,
+        headers={**headers, "Accept": "text/event-stream"},
+        method="POST",
+    )
+    try:
+        with urllib_request.urlopen(http_request, timeout=timeout_sec) as response:
+            for event in iter_sse_json_events(response, provider_label=provider_label):
+                chunk = extract_stream_chunk(event, provider_label=provider_label)
+                if chunk.text or chunk.finish_reason:
+                    yield chunk
+    except urllib_error.HTTPError as exc:
+        raise normalize_http_error(exc, provider_label=provider_label) from exc
+    except urllib_error.URLError as exc:
+        raise LLMTransportError(f"{provider_label} streaming request failed: {exc.reason}") from exc
+    except TimeoutError as exc:
+        raise LLMTransportError(
+            f"{provider_label} streaming request timed out after {timeout_sec}s."
+        ) from exc
+
+
+def iter_sse_json_events(response: Any, *, provider_label: str) -> Iterator[dict[str, Any]]:
+    data_lines: list[str] = []
+    while True:
+        raw_line = response.readline()
+        if raw_line == b"" or raw_line == "":
+            if data_lines:
+                event = _parse_sse_data("\n".join(data_lines), provider_label=provider_label)
+                if event is not None:
+                    yield event
+            return
+        line = _decode_sse_line(raw_line)
+        if not line:
+            if data_lines:
+                event = _parse_sse_data("\n".join(data_lines), provider_label=provider_label)
+                data_lines = []
+                if event is not None:
+                    yield event
+            continue
+        if line.startswith(":"):
+            continue
+        if line.startswith("data:"):
+            data_lines.append(line[5:].strip())
+
+
+def extract_stream_chunk(
+    event: dict[str, Any],
+    *,
+    provider_label: str,
+) -> LLMStreamChunk:
+    choices = event.get("choices")
+    if not isinstance(choices, list) or not choices:
+        return LLMStreamChunk(raw_event=event)
+    first = choices[0]
+    if not isinstance(first, dict):
+        raise LLMResponseError(f"{provider_label} stream first choice must be an object.")
+    delta = first.get("delta")
+    text = ""
+    if isinstance(delta, dict):
+        content = delta.get("content")
+        if isinstance(content, str):
+            text = content
+    finish_reason = first.get("finish_reason")
+    return LLMStreamChunk(
+        text=text,
+        finish_reason=str(finish_reason or ""),
+        raw_event=event,
+    )
+
+
 def parse_response_json(raw: str, *, provider_label: str) -> dict[str, Any]:
     try:
         payload = json.loads(raw)
@@ -89,6 +172,18 @@ def parse_response_json(raw: str, *, provider_label: str) -> dict[str, Any]:
     if not isinstance(payload, dict):
         raise LLMResponseError(f"{provider_label} response JSON must be an object.")
     return payload
+
+
+def _parse_sse_data(data: str, *, provider_label: str) -> dict[str, Any] | None:
+    if data == "[DONE]":
+        return None
+    return parse_response_json(data, provider_label=provider_label)
+
+
+def _decode_sse_line(raw_line: bytes | str) -> str:
+    if isinstance(raw_line, bytes):
+        return raw_line.decode("utf-8").rstrip("\r\n")
+    return raw_line.rstrip("\r\n")
 
 
 def extract_choice(payload: dict[str, Any], *, provider_label: str) -> tuple[str, str]:

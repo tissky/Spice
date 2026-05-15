@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from hashlib import sha256
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 from spice.decision.compare import render_compare_text
 from spice.decision.compare_payload import normalize_compare_payload
@@ -26,17 +26,26 @@ from spice.llm.candidate_expander import (
     merge_expanded_candidates,
 )
 from spice.llm.simulation_runner import simulate_candidates_from_runtime_config
+from spice.perception import build_evidence_context
 from spice.runtime.active_decision_frame import (
     attach_active_decision_frame,
     build_active_decision_frame,
 )
+from spice.runtime.conversation import build_conversation_turn, save_conversation_turn
+from spice.runtime.decision_brief import compose_decision_brief, render_decision_brief
+from spice.runtime.candidate_capabilities import annotate_required_capabilities
+from spice.runtime.candidate_evidence_gate import apply_candidate_evidence_gate
 from spice.runtime.execution_affordance import annotate_execution_affordances
+from spice.runtime.evidence_requirement import detect_evidence_requirement
+from spice.runtime.executor_capabilities import config_with_executor_capability_snapshot
 from spice.protocols import WorldState
 from spice.runtime.full_loop_preview import build_runtime_full_loop_preview
 from spice.language import detect_display_language
 from spice.runtime.memory_writeback import (
     skipped_general_decision_memory_writeback,
+    skipped_general_evolution_memory_writeback,
     write_general_decision_memory,
+    write_general_evolution_memory,
 )
 from spice.runtime.providers import ManualInputProvider, default_runtime_provider_descriptors
 from spice.runtime.session import DEFAULT_SESSION_ID, append_run_to_session, load_or_create_session
@@ -80,6 +89,12 @@ def run_once(
     session_id: str = DEFAULT_SESSION_ID,
     full_loop_preview: bool = True,
     run_intent_mode: str = "auto",
+    workspace_context: Mapping[str, Any] | None = None,
+    workspace_perception: Mapping[str, Any] | None = None,
+    url_context: Mapping[str, Any] | None = None,
+    url_perception: Mapping[str, Any] | None = None,
+    delegated_perception_context: Mapping[str, Any] | None = None,
+    delegated_perception: Mapping[str, Any] | None = None,
 ) -> RunOnceResult:
     """Run one manual-intent General decision loop.
 
@@ -109,6 +124,12 @@ def run_once(
         session_id=session_id,
         full_loop_preview=full_loop_preview,
         run_intent_mode=run_intent_mode,
+        workspace_context=workspace_context,
+        workspace_perception=workspace_perception,
+        url_context=url_context,
+        url_perception=url_perception,
+        delegated_perception_context=delegated_perception_context,
+        delegated_perception=delegated_perception,
         source="manual_intent",
         input_kind="manual_intent",
         input_source="cli",
@@ -141,6 +162,12 @@ def run_decision_loop_from_observations(
     trace_prefix: str = "trace.observation",
     run_prefix: str = "run.observation",
     perception_descriptor: dict[str, Any] | None = None,
+    workspace_context: Mapping[str, Any] | None = None,
+    workspace_perception: Mapping[str, Any] | None = None,
+    url_context: Mapping[str, Any] | None = None,
+    url_perception: Mapping[str, Any] | None = None,
+    delegated_perception_context: Mapping[str, Any] | None = None,
+    delegated_perception: Mapping[str, Any] | None = None,
 ) -> RunOnceResult:
     """Run the product decision loop from already-normalized observations."""
 
@@ -153,13 +180,41 @@ def run_decision_loop_from_observations(
     mode = _normalize_run_intent_mode(run_intent_mode)
     display_language = detect_display_language(text)
     effective_full_loop_preview = full_loop_preview and mode != "advise"
+    workspace_context_payload = _dict(workspace_context)
+    workspace_perception_payload = _dict(workspace_perception)
+    workspace_perception_id = str(
+        workspace_context_payload.get("perception_id")
+        or workspace_perception_payload.get("perception_id")
+        or ""
+    )
+    url_context_payload = _dict(url_context)
+    url_perception_payload = _dict(url_perception)
+    url_perception_id = str(
+        url_context_payload.get("perception_id")
+        or url_perception_payload.get("perception_id")
+        or ""
+    )
+    delegated_perception_context_payload = _dict(delegated_perception_context)
+    delegated_perception_payload = _dict(delegated_perception)
+    delegated_perception_id = str(
+        delegated_perception_context_payload.get("perception_id")
+        or delegated_perception_payload.get("perception_id")
+        or ""
+    )
+    evidence_requirement = detect_evidence_requirement(text)
+    evidence_context_payload = build_evidence_context(
+        requirements=evidence_requirement.to_payload(),
+        workspace_context=workspace_context_payload,
+        url_context=url_context_payload,
+        delegated_perception_context=delegated_perception_context_payload,
+    )
 
     created = now or datetime.now(timezone.utc)
     paths = workspace_paths(project_root)
     _require_workspace(paths)
     load_workspace_env(project_root)
     store = LocalJsonStore(paths)
-    config = _load_config(paths)
+    config = config_with_executor_capability_snapshot(_load_config(paths))
     workspace_config = SpiceWorkspaceConfig.from_payload(config)
     session = load_or_create_session(store, session_id=session_id, now=created)
     state_payload = store.load_state()
@@ -181,9 +236,16 @@ def run_decision_loop_from_observations(
             "kind": input_kind,
             "run_intent_mode": mode,
             "display_language": display_language,
+            "workspace_perception_id": workspace_perception_id,
+            "url_perception_id": url_perception_id,
+            "delegated_perception_id": delegated_perception_id,
         },
         session=payload_value(session),
         config=config,
+        workspace_context=workspace_context_payload or None,
+        url_context=url_context_payload or None,
+        delegated_perception_context=delegated_perception_context_payload or None,
+        evidence_context=evidence_context_payload,
         domain="general",
     )
     candidates = generate_generic_candidates(state_after)
@@ -220,6 +282,10 @@ def run_decision_loop_from_observations(
         active_decision_frame=decision_context.active_decision_frame,
         session=payload_value(session),
         config=config,
+        workspace_context=workspace_context_payload or None,
+        url_context=url_context_payload or None,
+        delegated_perception_context=delegated_perception_context_payload or None,
+        evidence_context=evidence_context_payload,
         domain="general",
     )
     candidate_simulation = simulate_candidates_from_runtime_config(
@@ -231,8 +297,18 @@ def run_decision_loop_from_observations(
         simulation_context=simulation_context,
     )
     candidate_simulation = merge_simulation_result_candidates(candidates, candidate_simulation)
+    candidates = candidate_simulation.candidates
+    candidate_evidence_gate = apply_candidate_evidence_gate(
+        candidates,
+        intent_text=text,
+        evidence_requirement=evidence_requirement,
+        workspace_context=workspace_context_payload,
+        evidence_context=evidence_context_payload,
+    )
+    candidates = candidate_evidence_gate.candidates
+    candidates = annotate_required_capabilities(candidates)
     candidates = annotate_execution_affordances(
-        candidate_simulation.candidates,
+        candidates,
         config=config,
     )
     candidates = annotate_skill_resolutions(candidates, config=config)
@@ -322,6 +398,76 @@ def run_decision_loop_from_observations(
     decision_path = store.record_path("decision", decision_id)
     approval_path = store.record_path("approval", approval_id) if approval_id else None
     session_path = store.record_path("session", session.session_id)
+    conversation_route = "execution_request" if mode == "act" else "new_decision"
+    conversation_turn = build_conversation_turn(
+        user_input=text,
+        route=conversation_route,
+        session_id=session.session_id,
+        created_at=created,
+        source_decision_id=decision_id,
+        source_candidate_id=checkpoint.selected_candidate_id,
+        source_run_id=run_id,
+        source_approval_id=approval_id,
+        artifact_refs={
+            "run": _workspace_relative(run_path),
+            "decision": _workspace_relative(decision_path),
+            "session": _workspace_relative(session_path),
+            "state": _workspace_relative(paths.state),
+            **(
+                {"approval": _workspace_relative(approval_path)}
+                if approval_path is not None
+                else {}
+            ),
+            **(
+                {
+                    "workspace_perception": _workspace_relative(
+                        store.record_path("perception", workspace_perception_id)
+                    )
+                }
+                if workspace_perception_id
+                else {}
+            ),
+            **(
+                {
+                    "url_perception": _workspace_relative(
+                        store.record_path("perception", url_perception_id)
+                    )
+                }
+                if url_perception_id
+                else {}
+            ),
+            **(
+                {
+                    "delegated_perception": _workspace_relative(
+                        store.record_path("perception", delegated_perception_id)
+                    )
+                }
+                if delegated_perception_id
+                else {}
+            ),
+        },
+        metadata={
+            "source": source,
+            "input_kind": input_kind,
+            "input_source": input_source,
+            "run_intent_mode": mode,
+            "display_language": display_language,
+            "evidence_requirement": evidence_requirement.to_payload(),
+            **(
+                {"workspace_context": workspace_context_payload}
+                if workspace_context_payload
+                else {}
+            ),
+            **({"url_context": url_context_payload} if url_context_payload else {}),
+            **(
+                {"delegated_perception_context": delegated_perception_context_payload}
+                if delegated_perception_context_payload
+                else {}
+            ),
+            "evidence_context": evidence_context_payload,
+        },
+    )
+    conversation_path = store.record_path("conversation_turn", conversation_turn.turn_id)
     state_before_ref = f"{_workspace_relative(paths.state)}#before:{state_before_hash}"
     state_after_ref = (
         f"{_workspace_relative(paths.state)}#after:{state_after_hash}"
@@ -333,15 +479,40 @@ def run_decision_loop_from_observations(
         "decision": _workspace_relative(decision_path),
         "state": _workspace_relative(paths.state),
         "session": _workspace_relative(session_path),
+        "conversation_turn": _workspace_relative(conversation_path),
     }
     if approval_path is not None:
         store_paths["approval"] = _workspace_relative(approval_path)
+    if workspace_perception_id:
+        store_paths["workspace_perception"] = _workspace_relative(
+            store.record_path("perception", workspace_perception_id)
+        )
+    if url_perception_id:
+        store_paths["url_perception"] = _workspace_relative(
+            store.record_path("perception", url_perception_id)
+        )
+    if delegated_perception_id:
+        store_paths["delegated_perception"] = _workspace_relative(
+            store.record_path("perception", delegated_perception_id)
+        )
+    decision_brief = compose_decision_brief(
+        compare_payload,
+        run_id=run_id,
+        decision_id=decision_id,
+        approval_id=approval_id,
+        run_intent_mode=mode,
+        handoff_blocked=handoff_blocked,
+        handoff_blockers=handoff_blockers,
+    )
     artifact = {
         "path_type": path_type,
         "generated_by": generated_by,
         "created_at": _timestamp(created),
         "run_id": run_id,
         "session_id": session.session_id,
+        "conversation_turn_id": conversation_turn.turn_id,
+        "response_id": conversation_turn.response_id,
+        "conversation_route": conversation_turn.route,
         "loop_mode": "full_loop_preview" if effective_full_loop_preview else "decision_only",
         "run_intent_mode": mode,
         "display_language": display_language,
@@ -372,7 +543,20 @@ def run_decision_loop_from_observations(
             "observation_ids": [
                 observation.observation_id for observation in normalized_observations
             ],
+            "workspace_perception_id": workspace_perception_id,
+            "url_perception_id": url_perception_id,
+            "delegated_perception_id": delegated_perception_id,
         },
+        "conversation_turn": conversation_turn.to_payload(),
+        "workspace_context": workspace_context_payload,
+        "workspace_perception": workspace_perception_payload,
+        "url_context": url_context_payload,
+        "url_perception": url_perception_payload,
+        "delegated_perception_context": delegated_perception_context_payload,
+        "delegated_perception": delegated_perception_payload,
+        "evidence_requirement": evidence_requirement.to_payload(),
+        "evidence_context": evidence_context_payload,
+        "candidate_evidence_gate": candidate_evidence_gate.to_payload(),
         "config": {
             "llm_provider": config.get("llm_provider"),
             "llm_model": config.get("llm_model"),
@@ -416,6 +600,7 @@ def run_decision_loop_from_observations(
             "simulation_context": payload_value(simulation_context),
         },
         "warnings": runtime_warnings,
+        "decision_brief": decision_brief,
         "raw_model_outputs": _raw_model_outputs(
             candidate_expansion=candidate_expansion.to_payload(),
             candidate_simulation=candidate_simulation.to_payload(),
@@ -449,6 +634,7 @@ def run_decision_loop_from_observations(
                 "handoff_required": mode == "act",
                 "handoff_blocked": handoff_blocked,
                 "handoff_blockers": handoff_blockers,
+                "decision_brief": decision_brief,
                 "decision_card": decision_card,
                 "llm_candidate_expansion": candidate_expansion.to_payload(),
                 "llm_simulation": candidate_simulation.to_payload(),
@@ -496,6 +682,7 @@ def run_decision_loop_from_observations(
             "handoff_required": mode == "act",
             "handoff_blocked": artifact["handoff_blocked"],
             "handoff_blockers": artifact["handoff_blockers"],
+            "decision_brief": artifact["decision_brief"],
             "decision_card": decision_card,
             "llm_candidate_expansion": artifact["llm_candidate_expansion"],
             "llm_simulation": artifact["llm_simulation"],
@@ -508,6 +695,8 @@ def run_decision_loop_from_observations(
         if artifact["approval_id"] and isinstance(artifact["approval"], dict)
         else None
     )
+    saved_conversation_path = save_conversation_turn(store, conversation_turn)
+    artifact["store_paths"]["conversation_turn"] = _workspace_relative(saved_conversation_path)
     saved_session = append_run_to_session(store, session, artifact, now=created)
     artifact["session"] = saved_session.to_payload()
     if persist:
@@ -520,8 +709,15 @@ def run_decision_loop_from_observations(
             artifact=artifact,
             config=workspace_config.to_payload(),
         )
+        artifact["evolution_memory_writeback"] = write_general_evolution_memory(
+            memory_provider,
+            record=_evolution_record_from_run_artifact(artifact),
+        )
     else:
         artifact["memory_writeback"] = skipped_general_decision_memory_writeback(
+            reason="persist=false",
+        )
+        artifact["evolution_memory_writeback"] = skipped_general_evolution_memory_writeback(
             reason="persist=false",
         )
     saved_run_path = store.save_run(run_id, artifact)
@@ -534,6 +730,45 @@ def run_decision_loop_from_observations(
         session_path=session_path,
         state_path=paths.state,
     )
+
+
+def _evolution_record_from_run_artifact(artifact: dict[str, Any]) -> dict[str, Any]:
+    compare = artifact.get("compare_payload") if isinstance(artifact.get("compare_payload"), dict) else {}
+    selected = compare.get("selected_recommendation") if isinstance(compare.get("selected_recommendation"), dict) else {}
+    brief = artifact.get("decision_brief") if isinstance(artifact.get("decision_brief"), dict) else {}
+    return {
+        "created_at": str(artifact.get("created_at") or ""),
+        "session_id": str(artifact.get("session_id") or ""),
+        "turn_id": str(artifact.get("conversation_turn_id") or ""),
+        "response_id": str(artifact.get("response_id") or ""),
+        "user_input": str(_dict(artifact.get("input")).get("text") or ""),
+        "route": str(artifact.get("conversation_route") or ""),
+        "route_result": {
+            "route": str(artifact.get("conversation_route") or ""),
+            "action": "new_intent" if artifact.get("conversation_route") == "new_decision" else "execute_selected",
+            "run_intent_mode": str(artifact.get("run_intent_mode") or ""),
+        },
+        "response_summary": str(
+            brief.get("summary")
+            or selected.get("human_summary")
+            or selected.get("title")
+            or ""
+        ),
+        "decision_id": str(artifact.get("decision_id") or ""),
+        "run_id": str(artifact.get("run_id") or ""),
+        "trace_ref": str(artifact.get("trace_ref") or ""),
+        "candidate_id": str(artifact.get("selected_candidate_id") or ""),
+        "selected_candidate": selected,
+        "follow_up_type": "",
+        "approval_id": str(artifact.get("approval_id") or ""),
+        "approval": artifact.get("approval") if isinstance(artifact.get("approval"), dict) else {},
+        "artifact_refs": artifact.get("store_paths") if isinstance(artifact.get("store_paths"), dict) else {},
+        "conversation_turn": artifact.get("conversation_turn") if isinstance(artifact.get("conversation_turn"), dict) else {},
+        "evidence_context": artifact.get("evidence_context") if isinstance(artifact.get("evidence_context"), dict) else {},
+        "workspace_context": artifact.get("workspace_context") if isinstance(artifact.get("workspace_context"), dict) else {},
+        "url_context": artifact.get("url_context") if isinstance(artifact.get("url_context"), dict) else {},
+        "delegated_perception_context": artifact.get("delegated_perception_context") if isinstance(artifact.get("delegated_perception_context"), dict) else {},
+    }
 
 
 def build_manual_intent_observations(
@@ -550,7 +785,7 @@ def render_run_once_text(*, intent: str, artifact: dict[str, Any]) -> str:
     summary = artifact["state_after_summary"]
     lines = [
         "SPICE RUN ONCE",
-        "manual intent -> General state -> candidates -> decision card",
+        "manual intent -> General state -> candidates -> decision brief",
         "no executor called | no SDEP sent",
         "",
         f"mode: {artifact.get('run_intent_mode', 'auto')}",
@@ -582,6 +817,8 @@ def render_run_once_text(*, intent: str, artifact: dict[str, Any]) -> str:
         _llm_runtime_status_line("candidate_expansion", artifact.get("llm_candidate_expansion")),
         _llm_runtime_status_line("simulation", artifact.get("llm_simulation")),
         "",
+        render_decision_brief(artifact["decision_brief"]),
+        "",
         artifact["decision_card"],
     ]
     return "\n".join(lines)
@@ -611,7 +848,9 @@ def render_run_once_full_loop_text(
         f"decision_id: {artifact['decision_id']}",
         f"trace_ref: {artifact['trace_ref']}",
         "",
-        "DECISION CARD",
+        "DECISION BRIEF",
+        render_decision_brief(artifact["decision_brief"]),
+        "",
         _llm_runtime_status_line("candidate_expansion", artifact.get("llm_candidate_expansion")),
         _llm_runtime_status_line("simulation", artifact.get("llm_simulation")),
         "",

@@ -7,6 +7,7 @@ class LLMTaskHook(str, Enum):
     ASSIST_DRAFT = "assist_draft"
     PERCEPTION_INTERPRET = "perception_interpret"
     DECISION_PROPOSE = "decision_propose"
+    RESPONSE_COMPOSE = "response_compose"
     SIMULATION_ADVISE = "simulation_advise"
     REFLECTION_SYNTHESIZE = "reflection_synthesize"
     SESSION_SUMMARIZE = "session_summarize"

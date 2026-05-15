@@ -36,6 +36,78 @@ PLANNING_ACTION_TYPES = frozenset(
     {"task.split", "artifact.draft", "item.triage", "context.prepare", "user.clarify"}
 )
 
+READ_ONLY_PERCEPTION_PATTERNS = tuple(
+    re.compile(pattern, re.IGNORECASE)
+    for pattern in (
+        r"\brepo_map\b",
+        r"\bsearch\b",
+        r"\bread_file\b",
+        r"\bread_package_metadata\b",
+        r"\bread_test_structure\b",
+        r"\bgit_status\b",
+        r"\bgit_diff\b",
+        r"\bgit_log\b",
+        r"\bpython_symbol_index\b",
+        r"\bread_python_symbol\b",
+        r"\bfetch_url\b",
+        r"\bextract_text\b",
+        r"\bsummarize_page\b",
+        r"\bweb_search\b",
+        r"\bread_web_page\b",
+        r"\bworkspace[-_ ]?perception\b",
+        r"\burl[-_ ]?perception\b",
+        r"\bread[-_ ]?only[-_ ]?investigation\b",
+        r"\bread[-_ ]?only[-_ ]?perception\b",
+        r"\binvestigation[-_ ]?consent\b",
+        r"\bevidence_context\b",
+        r"\bperception artifact\b",
+        r"\bfindings? (and|/|&) sources?\b",
+        r"只读(调查|感知)",
+        r"读取(本地|仓库|repo|文件)",
+        r"查看(当前)?实现",
+        r"基于实际代码判断",
+        r"搜索代码",
+        r"查看\s*git\s*状态",
+    )
+)
+
+STATE_CHANGING_ACTION_PATTERNS = tuple(
+    re.compile(pattern, re.IGNORECASE)
+    for pattern in (
+        r"\bwrite_file\b",
+        r"\bpatch\b",
+        r"\bdelete\b",
+        r"\bmove\b",
+        r"\binstall\b",
+        r"\btest_run\b",
+        r"\bterminal_command\b",
+        r"\bshell_command\b",
+        r"\brun\s+tests?\b",
+        r"\brun\s+command\b",
+        r"\bexecute\s+command\b",
+        r"\bapply\s+patch\b",
+        r"\bmodify\s+(a\s+)?(file|code|source|workspace|repo)\b",
+        r"\bedit\s+(a\s+)?(file|code|source|workspace|repo)\b",
+        r"\bcreate\s+(a\s+)?(file|patch|commit|pr|pull request)\b",
+        r"\bremove\b",
+        r"\bleave\s+(a\s+)?comment\b",
+        r"写入",
+        r"写文件",
+        r"修改(文件|代码|仓库|工作区)",
+        r"编辑(文件|代码|仓库|工作区)",
+        r"创建(文件|补丁|提交|PR|pull request)",
+        r"删除",
+        r"移动",
+        r"安装",
+        r"运行测试",
+        r"终端命令",
+        r"执行命令",
+        r"提交评论",
+        r"修复(文件|代码|bug|问题)",
+        r"实现(改动|功能|修复|补丁)",
+    )
+)
+
 
 @dataclass(slots=True)
 class EstimatedCost(PayloadRecord):
@@ -145,7 +217,7 @@ def is_approval_eligible_executable_candidate(candidate: GenericCandidate) -> bo
         return False
     if not _execution_intent_requests_handoff(candidate):
         return False
-    if _normalized_candidate_side_effect(candidate) != "external_effect":
+    if not crosses_execution_approval_boundary(candidate):
         return False
     if not candidate.requires_confirmation:
         return False
@@ -157,6 +229,19 @@ def is_approval_eligible_executable_candidate(candidate: GenericCandidate) -> bo
     if candidate.action_type == "capability.use" and not candidate.required_capability:
         return False
     return True
+
+
+def crosses_execution_approval_boundary(candidate: GenericCandidate) -> bool:
+    """Return true only for candidates that need side-effectful execution approval."""
+
+    text = _candidate_boundary_text(candidate)
+    state_changing = _has_state_changing_action(text)
+    read_only = _has_read_only_perception_action(text) and not state_changing
+    if state_changing:
+        return True
+    if read_only:
+        return False
+    return _normalized_candidate_side_effect(candidate) == "external_effect"
 
 
 def _execution_intent_requests_handoff(candidate: GenericCandidate) -> bool:
@@ -194,6 +279,73 @@ def _normalized_candidate_side_effect(candidate: GenericCandidate) -> str:
     if "read_only" in normalized:
         return "read_only"
     return ""
+
+
+def _is_read_only_perception_candidate(candidate: GenericCandidate) -> bool:
+    text = _candidate_boundary_text(candidate)
+    return _has_read_only_perception_action(text) and not _has_state_changing_action(text)
+
+
+def _has_read_only_perception_action(text: str) -> bool:
+    if not text:
+        return False
+    return any(pattern.search(text) for pattern in READ_ONLY_PERCEPTION_PATTERNS)
+
+
+def _has_state_changing_action(text: str) -> bool:
+    if not text:
+        return False
+    candidate_text = _without_negated_state_change_instructions(text)
+    return any(pattern.search(candidate_text) for pattern in STATE_CHANGING_ACTION_PATTERNS)
+
+
+def _without_negated_state_change_instructions(text: str) -> str:
+    return re.sub(
+        r"(?i)\b(?:do not|don't|never|no)\b.{0,80}\b"
+        r"(?:write|modify|edit|create|delete|move|install|run|execute|patch)\b"
+        r"|(?:不要|不能|禁止|不允许).{0,80}(?:写入|写文件|修改|编辑|创建|删除|移动|安装|运行|执行|打补丁)",
+        "",
+        text,
+    )
+
+
+def _candidate_boundary_text(candidate: GenericCandidate) -> str:
+    execution_intent = getattr(candidate, "execution_intent", GenericExecutionIntent())
+    boundary = candidate.execution_boundary
+    metadata = candidate.metadata if isinstance(candidate.metadata, dict) else {}
+    fragments: list[str] = [
+        candidate.action_type,
+        candidate.intent,
+        candidate.required_capability,
+        candidate.side_effect_class,
+        getattr(execution_intent, "intent_class", ""),
+        getattr(execution_intent, "handoff_task", ""),
+        getattr(execution_intent, "reason", ""),
+        getattr(execution_intent, "required_permission_hint", ""),
+        getattr(execution_intent, "side_effect_class", ""),
+        getattr(boundary, "mode", "") if boundary is not None else "",
+        getattr(boundary, "target", "") if boundary is not None else "",
+        getattr(boundary, "protocol", "") if boundary is not None else "",
+        getattr(boundary, "required_capability", "") if boundary is not None else "",
+        getattr(boundary, "side_effect_class", "") if boundary is not None else "",
+        getattr(candidate.expected_state_delta, "summary", ""),
+        " ".join(str(item) for item in candidate.target_refs),
+        str(metadata.get("executor_task") or ""),
+        str(metadata.get("handoff_task") or ""),
+        str(metadata.get("execution_objective") or ""),
+        str(metadata.get("tool_name") or ""),
+        str(metadata.get("workspace_query") or ""),
+        str(metadata.get("perception_tool") or ""),
+        str(metadata.get("context_strategy") or ""),
+        str(metadata.get("source") or ""),
+    ]
+    execution_boundary = metadata.get("execution_boundary")
+    if isinstance(execution_boundary, dict):
+        fragments.extend(str(value) for value in execution_boundary.values())
+    execution_intent_payload = metadata.get("execution_intent")
+    if isinstance(execution_intent_payload, dict):
+        fragments.extend(str(value) for value in execution_intent_payload.values())
+    return "\n".join(fragment for fragment in fragments if str(fragment or "").strip())
 
 
 def _candidate_kind(value: Any) -> str:

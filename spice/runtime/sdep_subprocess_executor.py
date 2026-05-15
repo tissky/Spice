@@ -557,6 +557,7 @@ def _update_session(
         run_ids=list(session.run_ids),
         decision_ids=list(session.decision_ids),
         approval_ids=list(session.approval_ids),
+        conversation_turn_ids=list(session.conversation_turn_ids),
         active_state_ref=".spice/state/state.json",
         last_run_id=session.last_run_id,
         last_decision_id=session.last_decision_id,

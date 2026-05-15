@@ -252,6 +252,7 @@ def _sync_references(store: LocalJsonStore, approval: Approval) -> dict[str, lis
             run_ids=list(session.run_ids),
             decision_ids=list(session.decision_ids),
             approval_ids=list(session.approval_ids),
+            conversation_turn_ids=list(session.conversation_turn_ids),
             active_state_ref=session.active_state_ref,
             last_run_id=session.last_run_id,
             last_decision_id=session.last_decision_id,

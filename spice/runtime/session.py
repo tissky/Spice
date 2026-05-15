@@ -19,6 +19,7 @@ class SessionRecord:
     run_ids: list[str] = field(default_factory=list)
     decision_ids: list[str] = field(default_factory=list)
     approval_ids: list[str] = field(default_factory=list)
+    conversation_turn_ids: list[str] = field(default_factory=list)
     active_state_ref: str | None = None
     last_run_id: str | None = None
     last_decision_id: str | None = None
@@ -41,6 +42,7 @@ class SessionRecord:
             run_ids=_strings(payload.get("run_ids")),
             decision_ids=_strings(payload.get("decision_ids")),
             approval_ids=_strings(payload.get("approval_ids")),
+            conversation_turn_ids=_strings(payload.get("conversation_turn_ids")),
             active_state_ref=_optional_string(payload.get("active_state_ref")),
             last_run_id=_optional_string(payload.get("last_run_id")),
             last_decision_id=_optional_string(payload.get("last_decision_id")),
@@ -113,6 +115,7 @@ def append_run_to_session(
     decision_id = _required_string(run_artifact, "decision_id")
     trace_ref = _optional_string(run_artifact.get("trace_ref"))
     approval_id = _optional_string(run_artifact.get("approval_id"))
+    conversation_turn_id = _optional_string(run_artifact.get("conversation_turn_id"))
     state_ref = _optional_string(run_artifact.get("state_after_ref"))
     updated_at = _timestamp(now or datetime.now(timezone.utc))
 
@@ -124,6 +127,11 @@ def append_run_to_session(
         run_ids=_append_unique(session.run_ids, run_id),
         decision_ids=_append_unique(session.decision_ids, decision_id),
         approval_ids=_append_unique(session.approval_ids, approval_id) if approval_id else list(session.approval_ids),
+        conversation_turn_ids=(
+            _append_unique(session.conversation_turn_ids, conversation_turn_id)
+            if conversation_turn_id
+            else list(session.conversation_turn_ids)
+        ),
         active_state_ref=state_ref or session.active_state_ref,
         last_run_id=run_id,
         last_decision_id=decision_id,
@@ -163,6 +171,7 @@ def archive_session(
         run_ids=list(session.run_ids),
         decision_ids=list(session.decision_ids),
         approval_ids=list(session.approval_ids),
+        conversation_turn_ids=list(session.conversation_turn_ids),
         active_state_ref=session.active_state_ref,
         last_run_id=session.last_run_id,
         last_decision_id=session.last_decision_id,
@@ -186,6 +195,7 @@ def delete_session(
         "runs": [],
         "decisions": [],
         "approvals": [],
+        "conversation_turns": [],
         "outcomes": [],
     }
     if cascade:
@@ -200,6 +210,7 @@ def delete_session(
             ("runs", session.run_ids),
             ("decisions", session.decision_ids),
             ("approvals", session.approval_ids),
+            ("conversation_turns", session.conversation_turn_ids),
             ("outcomes", _unique(outcome_ids)),
         ):
             for record_id in ids:
@@ -434,7 +445,7 @@ def render_session_delete_result(result: dict[str, Any]) -> str:
         f"session_id: {result.get('session_id')}",
         f"cascade: {str(bool(result.get('cascade'))).lower()}",
     ]
-    for kind in ("sessions", "runs", "decisions", "approvals", "outcomes"):
+    for kind in ("sessions", "runs", "decisions", "approvals", "conversation_turns", "outcomes"):
         values = deleted.get(kind)
         count = len(values) if isinstance(values, list) else 0
         lines.append(f"- {kind}: {count}")

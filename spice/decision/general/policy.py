@@ -438,6 +438,7 @@ def _build_compare_payload(
             "candidate_id": selected_candidate_id,
             "action": selected_candidate.action_type,
             "title": selected_product.get("user_facing_title") or _title(selected_candidate.action_type),
+            "required_capability": selected_candidate.required_capability,
             "selection_reason": str(explanation.get("final_selection_reason", "")),
             "decision_basis": _selected_basis(
                 selected_candidate_id=selected_candidate_id,
@@ -972,6 +973,7 @@ def _compare_candidate(
         "title": product.get("user_facing_title") or _title(candidate.action_type),
         "action": candidate.action_type,
         "intent": candidate.intent,
+        "required_capability": candidate.required_capability,
         "recommended_action": product.get("recommended_action", ""),
         "why_now": list(product.get("why_now", [])),
         "expected_result": product.get("expected_result", ""),

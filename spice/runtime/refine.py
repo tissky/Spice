@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from hashlib import sha256
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 from spice.decision.compare import render_compare_text
 from spice.decision.general import (
@@ -29,17 +29,26 @@ from spice.llm.candidate_expander import (
     merge_expanded_candidates,
 )
 from spice.llm.simulation_runner import simulate_candidates_from_runtime_config
+from spice.perception import build_evidence_context
 from spice.runtime.active_decision_frame import (
     attach_active_decision_frame,
     build_active_decision_frame,
 )
+from spice.runtime.decision_brief import compose_decision_brief, render_decision_brief
+from spice.runtime.candidate_capabilities import annotate_required_capabilities
+from spice.runtime.candidate_evidence_gate import apply_candidate_evidence_gate
 from spice.runtime.execution_affordance import annotate_execution_affordances
+from spice.runtime.evidence_requirement import detect_evidence_requirement
+from spice.runtime.executor_capabilities import config_with_executor_capability_snapshot
 from spice.runtime.full_loop_preview import build_runtime_full_loop_preview
 from spice.runtime.memory_writeback import (
     skipped_general_decision_memory_writeback,
+    skipped_general_evolution_memory_writeback,
     write_general_decision_memory,
+    write_general_evolution_memory,
 )
 from spice.runtime.run_once import (
+    _evolution_record_from_run_artifact,
     _candidate_summary,
     _candidate_selection_for_run_mode,
     _hash,
@@ -98,6 +107,12 @@ def refine_decision(
     persist: bool = True,
     full_loop_preview: bool = True,
     run_intent_mode: str | None = None,
+    workspace_context: Mapping[str, Any] | None = None,
+    workspace_perception: Mapping[str, Any] | None = None,
+    url_context: Mapping[str, Any] | None = None,
+    url_perception: Mapping[str, Any] | None = None,
+    delegated_perception_context: Mapping[str, Any] | None = None,
+    delegated_perception: Mapping[str, Any] | None = None,
 ) -> RefineResult:
     text = refinement.strip()
     if not text:
@@ -107,7 +122,7 @@ def refine_decision(
     paths = workspace_paths(project_root)
     _require_workspace(paths)
     store = LocalJsonStore(paths)
-    config = _load_config(paths)
+    config = config_with_executor_capability_snapshot(_load_config(paths))
     workspace_config = SpiceWorkspaceConfig.from_payload(config)
     session = load_or_create_session(store, session_id=session_id, now=created)
     parent_run_id = run_id or session.last_run_id
@@ -116,8 +131,37 @@ def refine_decision(
     parent = store.load_run(parent_run_id)
     parent_candidates = _load_parent_candidates(parent)
     parent_intent = _parent_intent(parent)
+    refined_intent = f"{parent_intent}\n\nRefinement: {text}"
     mode = _normalize_run_intent_mode(run_intent_mode or str(parent.get("run_intent_mode") or "auto"))
     effective_full_loop_preview = full_loop_preview and mode != "advise"
+    workspace_context_payload = dict(workspace_context or {})
+    workspace_perception_payload = dict(workspace_perception or {})
+    workspace_perception_id = str(
+        workspace_context_payload.get("perception_id")
+        or workspace_perception_payload.get("perception_id")
+        or ""
+    )
+    url_context_payload = dict(url_context or {})
+    url_perception_payload = dict(url_perception or {})
+    url_perception_id = str(
+        url_context_payload.get("perception_id")
+        or url_perception_payload.get("perception_id")
+        or ""
+    )
+    delegated_perception_context_payload = dict(delegated_perception_context or {})
+    delegated_perception_payload = dict(delegated_perception or {})
+    delegated_perception_id = str(
+        delegated_perception_context_payload.get("perception_id")
+        or delegated_perception_payload.get("perception_id")
+        or ""
+    )
+    evidence_requirement = detect_evidence_requirement(refined_intent)
+    evidence_context_payload = build_evidence_context(
+        requirements=evidence_requirement.to_payload(),
+        workspace_context=workspace_context_payload,
+        url_context=url_context_payload,
+        delegated_perception_context=delegated_perception_context_payload,
+    )
 
     state_payload = store.load_state()
     state_before_hash = _hash(state_payload)[:12]
@@ -129,7 +173,6 @@ def refine_decision(
         project_root,
         config=workspace_config,
     )
-    refined_intent = f"{parent_intent}\n\nRefinement: {text}"
     decision_context = context_compiler.compile_general_decision_context(
         world_state,
         state,
@@ -140,9 +183,16 @@ def refine_decision(
             "run_intent_mode": mode,
             "display_language": display_language,
             "parent_run_id": parent_run_id,
+            "workspace_perception_id": workspace_perception_id,
+            "url_perception_id": url_perception_id,
+            "delegated_perception_id": delegated_perception_id,
         },
         session=payload_value(session),
         config=config,
+        workspace_context=workspace_context_payload or None,
+        url_context=url_context_payload or None,
+        delegated_perception_context=delegated_perception_context_payload or None,
+        evidence_context=evidence_context_payload,
         domain="general",
     )
 
@@ -180,6 +230,10 @@ def refine_decision(
         active_decision_frame=decision_context.active_decision_frame,
         session=payload_value(session),
         config=config,
+        workspace_context=workspace_context_payload or None,
+        url_context=url_context_payload or None,
+        delegated_perception_context=delegated_perception_context_payload or None,
+        evidence_context=evidence_context_payload,
         domain="general",
     )
     candidate_simulation = simulate_candidates_from_runtime_config(
@@ -191,8 +245,18 @@ def refine_decision(
         simulation_context=simulation_context,
     )
     candidate_simulation = merge_simulation_result_candidates(candidates, candidate_simulation)
+    candidates = candidate_simulation.candidates
+    candidate_evidence_gate = apply_candidate_evidence_gate(
+        candidates,
+        intent_text=refined_intent,
+        evidence_requirement=evidence_requirement,
+        workspace_context=workspace_context_payload,
+        evidence_context=evidence_context_payload,
+    )
+    candidates = candidate_evidence_gate.candidates
+    candidates = annotate_required_capabilities(candidates)
     candidates = annotate_execution_affordances(
-        candidate_simulation.candidates,
+        candidates,
         config=config,
     )
     candidates = annotate_skill_resolutions(candidates, config=config)
@@ -283,6 +347,27 @@ def refine_decision(
     }
     if approval_path is not None:
         store_paths["approval"] = _workspace_relative(approval_path)
+    if workspace_perception_id:
+        store_paths["workspace_perception"] = _workspace_relative(
+            store.record_path("perception", workspace_perception_id)
+        )
+    if url_perception_id:
+        store_paths["url_perception"] = _workspace_relative(
+            store.record_path("perception", url_perception_id)
+        )
+    if delegated_perception_id:
+        store_paths["delegated_perception"] = _workspace_relative(
+            store.record_path("perception", delegated_perception_id)
+        )
+    decision_brief = compose_decision_brief(
+        compare_payload,
+        run_id=run_id_value,
+        decision_id=decision_id,
+        approval_id=approval_id,
+        run_intent_mode=mode,
+        handoff_blocked=handoff_blocked,
+        handoff_blockers=handoff_blockers,
+    )
 
     artifact: dict[str, Any] = {
         "path_type": "manual_intent_refine",
@@ -316,7 +401,19 @@ def refine_decision(
             "text": text,
             "parent_intent": parent_intent,
             "parent_run_id": parent_run_id,
+            "workspace_perception_id": workspace_perception_id,
+            "url_perception_id": url_perception_id,
+            "delegated_perception_id": delegated_perception_id,
         },
+        "workspace_context": workspace_context_payload,
+        "workspace_perception": workspace_perception_payload,
+        "url_context": url_context_payload,
+        "url_perception": url_perception_payload,
+        "delegated_perception_context": delegated_perception_context_payload,
+        "delegated_perception": delegated_perception_payload,
+        "evidence_requirement": evidence_requirement.to_payload(),
+        "evidence_context": evidence_context_payload,
+        "candidate_evidence_gate": candidate_evidence_gate.to_payload(),
         "read_only_execution": True,
         "executor_called": False,
         "sdep_request_sent": False,
@@ -338,6 +435,7 @@ def refine_decision(
             "simulation_context": payload_value(simulation_context),
         },
         "warnings": runtime_warnings,
+        "decision_brief": decision_brief,
         "raw_model_outputs": _raw_model_outputs(
             candidate_expansion=expansion.to_payload(),
             candidate_simulation=candidate_simulation.to_payload(),
@@ -402,8 +500,24 @@ def refine_decision(
             artifact=artifact,
             config=workspace_config.to_payload(),
         )
+        artifact["evolution_memory_writeback"] = write_general_evolution_memory(
+            memory_provider,
+            record={
+                **_evolution_record_from_run_artifact(artifact),
+                "route": "follow_up",
+                "route_result": {
+                    "route": "follow_up",
+                    "action": "refine",
+                    "run_intent_mode": str(artifact.get("run_intent_mode") or ""),
+                },
+                "follow_up_type": "refine",
+            },
+        )
     else:
         artifact["memory_writeback"] = skipped_general_decision_memory_writeback(
+            reason="persist=false",
+        )
+        artifact["evolution_memory_writeback"] = skipped_general_evolution_memory_writeback(
             reason="persist=false",
         )
     saved_run_path = store.save_run(run_id_value, artifact)
@@ -447,6 +561,9 @@ def render_refine_text(
         f"- sdep_request_sent: {str(bool(artifact['sdep_request_sent'])).lower()}",
         f"- state_persisted: {str(bool(artifact['state_persisted'])).lower()}",
         f"- persist_mode: {artifact['persist_mode']}",
+        "",
+        "UPDATED DECISION BRIEF",
+        render_decision_brief(artifact["decision_brief"]),
         "",
         "UPDATED DECISION CARD",
         decision_card,

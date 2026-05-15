@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Mapping
 
 from spice.llm.candidate_expander import build_candidate_expander_client
@@ -17,6 +17,16 @@ class ContinuationResolution:
     candidate_id: str = ""
     label: str = ""
     text: str = ""
+    context_strategy: str = "none"
+    needs_workspace_context: bool = False
+    workspace_query: str = ""
+    needs_url_context: bool = False
+    url_query: str = ""
+    urls: list[str] = field(default_factory=list)
+    needs_delegated_perception: bool = False
+    delegated_perception_query: str = ""
+    delegated_perception_reason: str = ""
+    suggested_capabilities: list[str] = field(default_factory=list)
     reason: str = ""
 
     def to_payload(self) -> dict[str, Any]:
@@ -26,6 +36,16 @@ class ContinuationResolution:
             "candidate_id": self.candidate_id,
             "label": self.label,
             "text": self.text,
+            "context_strategy": self.context_strategy,
+            "needs_workspace_context": self.needs_workspace_context,
+            "workspace_query": self.workspace_query,
+            "needs_url_context": self.needs_url_context,
+            "url_query": self.url_query,
+            "urls": list(self.urls),
+            "needs_delegated_perception": self.needs_delegated_perception,
+            "delegated_perception_query": self.delegated_perception_query,
+            "delegated_perception_reason": self.delegated_perception_reason,
+            "suggested_capabilities": list(self.suggested_capabilities),
             "reason": self.reason,
         }
 
@@ -34,89 +54,14 @@ def resolve_continuation(
     user_input: str,
     active_frame: Mapping[str, Any] | None,
 ) -> ContinuationResolution:
+    """Legacy no-LLM continuation resolver.
+
+    Natural follow-up semantics are intentionally routed through the LLM
+    semantic router. Deterministic routing is reserved for slash commands in
+    ``command_router`` and runtime guardrails after a semantic route is chosen.
+    """
+
     text = user_input.strip()
-    if not text or not isinstance(active_frame, Mapping) or not active_frame:
-        return ContinuationResolution(False, text=text)
-
-    normalized = _normalize(text)
-    label = _option_label_from_text(normalized)
-    if label:
-        candidate = _candidate_by_label(active_frame, label)
-        if candidate:
-            return ContinuationResolution(
-                True,
-                action="choose_option",
-                candidate_id=str(candidate.get("candidate_id") or ""),
-                label=str(candidate.get("label") or label),
-                text=text,
-                reason="User referenced a visible Decision Card option.",
-            )
-
-    if _is_execute_selected(normalized):
-        selected = _mapping(active_frame.get("selected"))
-        return ContinuationResolution(
-            True,
-            action="execute_selected",
-            candidate_id=str(selected.get("candidate_id") or active_frame.get("selected_candidate_id") or ""),
-            label=str(selected.get("label") or ""),
-            text=text,
-            reason="User asked to execute the current selected decision.",
-        )
-
-    approval_id = str(active_frame.get("approval_id") or "").strip()
-    if approval_id and normalized in {
-        "y",
-        "yes",
-        "approve and execute",
-        "approve execute",
-        "approve then execute",
-        "批准并执行",
-    }:
-        return ContinuationResolution(
-            True,
-            action="approve_execute",
-            candidate_id=str(active_frame.get("selected_candidate_id") or ""),
-            text=text,
-            reason="User approved and asked to execute the pending selected decision.",
-        )
-
-    if normalized in {"approve", "approved", "yes", "y", "ok"}:
-        return ContinuationResolution(
-            True,
-            action="approve_only",
-            candidate_id=str(active_frame.get("selected_candidate_id") or ""),
-            text=text,
-            reason="User approved the current selected decision.",
-        )
-
-    if normalized in {"details", "detail", "why", "show details", "show why", "详情", "为什么"}:
-        return ContinuationResolution(
-            True,
-            action="show_details",
-            candidate_id=str(active_frame.get("selected_candidate_id") or ""),
-            text=text,
-            reason="User asked for details about the current Decision Card.",
-        )
-
-    if normalized in {"skip", "later", "not now", "先跳过", "跳过"}:
-        return ContinuationResolution(
-            True,
-            action="skip",
-            candidate_id=str(active_frame.get("selected_candidate_id") or ""),
-            text=text,
-            reason="User skipped the current Decision Card.",
-        )
-
-    refine_text = _refine_text(normalized, text)
-    if refine_text:
-        return ContinuationResolution(
-            True,
-            action="refine",
-            candidate_id=str(active_frame.get("selected_candidate_id") or ""),
-            text=refine_text,
-            reason="User refined the current Decision Card.",
-        )
-
     return ContinuationResolution(False, text=text)
 
 
@@ -228,14 +173,38 @@ def _is_execute_selected(normalized: str) -> bool:
         "act",
         "act on selected",
         "act on this",
+        "start",
+        "start it",
+        "start now",
+        "begin",
+        "begin it",
         "do it",
         "make it happen",
         "run it",
         "go",
+        "go ahead",
+        "execute previous",
+        "execute that",
+        "execute the previous one",
+        "implement this",
+        "implement it",
+        "ship it",
+        "开始",
+        "开始吧",
+        "开始做",
+        "开始执行",
         "执行",
+        "执行刚才那个",
         "执行这个",
         "执行选中",
         "就执行这个",
+        "就按这个做",
+        "就这么做",
+        "那就开始吧",
+        "那就开始做吧",
+        "那就执行吧",
+        "去做吧",
+        "做这个",
     }
 
 
@@ -272,6 +241,68 @@ def _option_label_from_text(normalized: str) -> str:
         r"^选择\s*([a-z])$",
         r"^选\s*(第?一|第?二|第?三|1|2|3)个?$",
         r"^选择\s*(第?一|第?二|第?三|1|2|3)个?$",
+    ]
+    for pattern in patterns:
+        match = re.match(pattern, normalized)
+        if not match:
+            continue
+        label = _label_token(match.group(1))
+        if label:
+            return label
+    return ""
+
+
+def _why_not_label_from_text(normalized: str) -> str:
+    patterns = [
+        r"^why\s+(?:not|isn't|isnt)\s+([a-z])\??$",
+        r"^why\s+(?:not|isn't|isnt)\s+(first|second|third|1st|2nd|3rd|one|two|three)\??$",
+        r"^why\s+did(?:n't| not)\s+(?:we\s+)?(?:choose|pick|select)\s+([a-z])\??$",
+        r"^why\s+not\s+(?:choose|pick|select)\s+([a-z])\??$",
+        r"^为什么(?:不是|不选|没选|没有选)\s*([a-z])\??$",
+        r"^为什么(?:不是|不选|没选|没有选)\s*(第?一|第?二|第?三|1|2|3)个?\??$",
+    ]
+    for pattern in patterns:
+        match = re.match(pattern, normalized)
+        if not match:
+            continue
+        label = _label_token(match.group(1))
+        if label:
+            return label
+    return ""
+
+
+def _plan_label_from_text(normalized: str) -> str:
+    patterns = [
+        r"^(?:give me|show me|make|create|draft)\s+(?:a\s+)?(?:plan|implementation plan|next plan)\s+for\s+([a-z])$",
+        r"^(?:give me|show me|make|create|draft)\s+([a-z])(?:'s)?\s+(?:plan|implementation plan)$",
+        r"^(?:plan|implementation plan)\s+for\s+([a-z])$",
+        r"^([a-z])(?:'s)?\s+(?:plan|implementation plan)$",
+        r"^(?:给我|生成|做|写)\s*([a-z])\s*(?:的)?(?:计划|执行计划|方案)$",
+        r"^(?:给我|生成|做|写)\s*(第?一|第?二|第?三|1|2|3)\s*(?:个)?(?:的)?(?:计划|执行计划|方案)$",
+        r"^([a-z])\s*(?:的)?(?:计划|执行计划|方案)$",
+    ]
+    for pattern in patterns:
+        match = re.match(pattern, normalized)
+        if not match:
+            continue
+        label = _label_token(match.group(1))
+        if label:
+            return label
+    return ""
+
+
+def _execute_label_from_text(normalized: str) -> str:
+    patterns = [
+        r"^(?:execute|implement|start|begin|run)\s+([a-z])$",
+        r"^(?:execute|implement|start|begin|run)\s+(first|second|third|1st|2nd|3rd|one|two|three)$",
+        r"^(?:go with|choose|pick|select)\s+([a-z])\s+and\s+(?:execute|implement|start|run)(?:\s+it)?$",
+        r"^就按\s*([a-z])\s*(?:做|执行)$",
+        r"^按\s*([a-z])\s*(?:做|执行)$",
+        r"^执行\s*([a-z])$",
+        r"^开始\s*([a-z])$",
+        r"^做\s*([a-z])$",
+        r"^就按\s*(第?一|第?二|第?三|1|2|3)\s*个?(?:做|执行)$",
+        r"^执行\s*(第?一|第?二|第?三|1|2|3)\s*个?$",
     ]
     for pattern in patterns:
         match = re.match(pattern, normalized)
@@ -381,12 +412,16 @@ def _llm_fallback_prompt(user_input: str, active_frame: Mapping[str, Any]) -> st
             "approve_only",
             "refine",
             "show_details",
+            "explain_why_not",
+            "plan_candidate",
             "skip",
             "new_intent",
         ],
         "rules": [
             "Use choose_option when the user picks one visible option by label, ordinal, title, or meaning.",
             "Use execute_selected when the user says to start, do it, implement it, make it happen, or equivalent.",
+            "Use explain_why_not when the user asks why a visible alternative was not selected.",
+            "Use plan_candidate when the user asks for a plan for a visible option.",
             "Use refine when the user asks to adjust the current Decision Card.",
             "Use new_intent for unrelated new requests.",
         ],
@@ -479,12 +514,30 @@ def _resolution_from_llm_payload(
 
     selected = _mapping(active_frame.get("selected"))
     selected_id = str(selected.get("candidate_id") or active_frame.get("selected_candidate_id") or "")
-    if action in {"execute_selected", "approve_execute", "approve_only", "show_details", "skip"}:
+    if action in {
+        "execute_selected",
+        "approve_execute",
+        "approve_only",
+        "show_details",
+        "explain_why_not",
+        "plan_candidate",
+        "skip",
+    }:
+        candidate = None
+        if action in {"execute_selected", "explain_why_not", "plan_candidate"}:
+            candidate_id = str(payload.get("candidate_id") or "").strip()
+            if candidate_id:
+                candidate = _candidate_by_id(active_frame, candidate_id)
+            if candidate is None:
+                label = _label_token(str(payload.get("candidate_label") or ""))
+                candidate = _candidate_by_label(active_frame, label) if label else None
+            if candidate is None and action in {"explain_why_not", "plan_candidate"}:
+                return ContinuationResolution(False, text=text, reason="LLM referenced an unknown candidate.")
         return ContinuationResolution(
             True,
             action=action,
-            candidate_id=selected_id,
-            label=str(selected.get("label") or ""),
+            candidate_id=str(_mapping(candidate).get("candidate_id") or selected_id),
+            label=str(_mapping(candidate).get("label") or selected.get("label") or ""),
             text=text,
             reason=str(payload.get("reason") or "LLM classified this as a continuation."),
         )

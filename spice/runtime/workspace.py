@@ -5,7 +5,7 @@ import os
 from dataclasses import dataclass, field
 from importlib.resources import files
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 from spice.decision.general import GeneralDecisionState, store_general_state
 from spice.decision.general.types import payload_value
@@ -47,7 +47,17 @@ DEFAULT_WORKSPACE_CONFIG: dict[str, str] = {
     "active_session_id": "session.default",
 }
 
+DEFAULT_WORKSPACE_PERCEPTION_CONFIG: dict[str, str] = {
+    "depth": "auto",
+    "max_rounds": "",
+    "max_tool_calls": "",
+    "max_files_read": "",
+    "total_char_budget": "",
+}
+
 VALID_WORKSPACE_CONFIG_KEYS = frozenset(DEFAULT_WORKSPACE_CONFIG.keys())
+VALID_WORKSPACE_PERCEPTION_CONFIG_KEYS = frozenset(DEFAULT_WORKSPACE_PERCEPTION_CONFIG.keys())
+VALID_WORKSPACE_PERCEPTION_DEPTHS = frozenset({"auto", "normal", "deep", "native"})
 VALID_WORKSPACE_EXECUTORS = frozenset(
     {"claude_code", "codex", "dry_run", "hermes", "sdep_subprocess"}
 )
@@ -111,6 +121,9 @@ class SpiceWorkspaceConfig:
         "memory_summary_target_chars"
     ]
     active_session_id: str = DEFAULT_WORKSPACE_CONFIG["active_session_id"]
+    workspace_perception: dict[str, Any] = field(
+        default_factory=lambda: dict(DEFAULT_WORKSPACE_PERCEPTION_CONFIG)
+    )
     metadata: dict[str, Any] = field(
         default_factory=lambda: {
             "created_by": "spice setup",
@@ -216,6 +229,9 @@ class SpiceWorkspaceConfig:
             active_session_id=str(
                 payload.get("active_session_id") or DEFAULT_WORKSPACE_CONFIG["active_session_id"]
             ),
+            workspace_perception=_workspace_perception_config_from_payload(
+                payload.get("workspace_perception")
+            ),
             metadata=dict(payload.get("metadata")) if isinstance(payload.get("metadata"), dict) else {},
         )
 
@@ -232,8 +248,11 @@ class SpiceWorkspacePaths:
     runs_dir: Path
     decisions_dir: Path
     approvals_dir: Path
+    investigations_dir: Path
     outcomes_dir: Path
     perceptions_dir: Path
+    conversations_dir: Path
+    cache_dir: Path
     memory_dir: Path
     executors_dir: Path
     skills_dir: Path
@@ -247,8 +266,11 @@ class SpiceWorkspacePaths:
             self.runs_dir,
             self.decisions_dir,
             self.approvals_dir,
+            self.investigations_dir,
             self.outcomes_dir,
             self.perceptions_dir,
+            self.conversations_dir,
+            self.cache_dir,
             self.memory_dir,
             self.executors_dir,
             self.skills_dir,
@@ -285,8 +307,11 @@ def workspace_paths(project_root: str | Path = ".") -> SpiceWorkspacePaths:
         runs_dir=spice_dir / "runs",
         decisions_dir=spice_dir / "decisions",
         approvals_dir=spice_dir / "approvals",
+        investigations_dir=spice_dir / "investigations",
         outcomes_dir=spice_dir / "outcomes",
         perceptions_dir=spice_dir / "perceptions",
+        conversations_dir=spice_dir / "conversations",
+        cache_dir=spice_dir / "cache",
         memory_dir=spice_dir / "memory",
         executors_dir=spice_dir / "executors",
         skills_dir=spice_dir / "skills",
@@ -421,7 +446,15 @@ def update_workspace_config(
     payload = json.loads(paths.config.read_text(encoding="utf-8"))
     if not isinstance(payload, dict):
         raise ValueError("Workspace config payload must be a dict.")
-    payload[normalized_key] = normalized_value
+    if normalized_key.startswith("workspace_perception."):
+        perception_key = normalized_key.split(".", 1)[1]
+        workspace_perception = payload.get("workspace_perception")
+        if not isinstance(workspace_perception, dict):
+            workspace_perception = dict(DEFAULT_WORKSPACE_PERCEPTION_CONFIG)
+        workspace_perception[perception_key] = normalized_value
+        payload["workspace_perception"] = workspace_perception
+    else:
+        payload[normalized_key] = normalized_value
     paths.config.write_text(
         json.dumps(payload, ensure_ascii=True, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
@@ -469,8 +502,15 @@ def validate_workspace_config_update(
     value: str,
 ) -> tuple[str, str]:
     normalized_key = key.strip()
+    if normalized_key.startswith("workspace_perception."):
+        nested_key = normalized_key.split(".", 1)[1].strip()
+        normalized_nested_key, normalized_value = _validate_workspace_perception_config_update(
+            nested_key,
+            value,
+        )
+        return f"workspace_perception.{normalized_nested_key}", normalized_value
     if normalized_key not in VALID_WORKSPACE_CONFIG_KEYS:
-        valid = ", ".join(sorted(VALID_WORKSPACE_CONFIG_KEYS))
+        valid = ", ".join(sorted(_all_valid_workspace_config_keys()))
         raise ValueError(f"Unknown config key: {key}. Valid keys: {valid}.")
     normalized_value = value.strip()
     optional_keys = {
@@ -588,6 +628,62 @@ def validate_workspace_config_update(
                 "Run `spice session list` to find available sessions."
             )
     return normalized_key, normalized_value
+
+
+def _all_valid_workspace_config_keys() -> tuple[str, ...]:
+    nested = tuple(
+        f"workspace_perception.{key}" for key in sorted(VALID_WORKSPACE_PERCEPTION_CONFIG_KEYS)
+    )
+    return tuple(sorted(VALID_WORKSPACE_CONFIG_KEYS)) + nested
+
+
+def _workspace_perception_config_from_payload(value: object) -> dict[str, str]:
+    result = dict(DEFAULT_WORKSPACE_PERCEPTION_CONFIG)
+    if not isinstance(value, Mapping):
+        return result
+    for key in VALID_WORKSPACE_PERCEPTION_CONFIG_KEYS:
+        if key not in value:
+            continue
+        _, normalized_value = _validate_workspace_perception_config_update(
+            key,
+            str(value.get(key) or ""),
+        )
+        result[key] = normalized_value
+    return result
+
+
+def _validate_workspace_perception_config_update(key: str, value: str) -> tuple[str, str]:
+    normalized_key = key.strip()
+    if normalized_key not in VALID_WORKSPACE_PERCEPTION_CONFIG_KEYS:
+        valid = ", ".join(sorted(VALID_WORKSPACE_PERCEPTION_CONFIG_KEYS))
+        raise ValueError(
+            f"Unknown workspace_perception config key: {key}. Valid keys: {valid}."
+        )
+    normalized_value = value.strip()
+    if normalized_key == "depth":
+        if not normalized_value:
+            normalized_value = DEFAULT_WORKSPACE_PERCEPTION_CONFIG["depth"]
+        if normalized_value not in VALID_WORKSPACE_PERCEPTION_DEPTHS:
+            valid = ", ".join(sorted(VALID_WORKSPACE_PERCEPTION_DEPTHS))
+            raise ValueError(
+                f"Invalid workspace_perception.depth: {normalized_value}. Valid values: {valid}."
+            )
+        return normalized_key, normalized_value
+    if normalized_value == "":
+        return normalized_key, ""
+    try:
+        parsed = int(normalized_value)
+    except ValueError as exc:
+        raise ValueError(
+            f"Invalid workspace_perception.{normalized_key}: {normalized_value}. "
+            "Must be a positive integer or empty."
+        ) from exc
+    if parsed <= 0:
+        raise ValueError(
+            f"Invalid workspace_perception.{normalized_key}: {normalized_value}. "
+            "Must be positive."
+        )
+    return normalized_key, str(parsed)
 
 
 def _normalize_config_bool(value: str, *, key: str) -> str:

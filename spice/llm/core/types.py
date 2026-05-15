@@ -39,3 +39,10 @@ class LLMResponse:
     usage: dict[str, Any]
     latency_ms: int
     request_id: str
+
+
+@dataclass(slots=True, frozen=True)
+class LLMStreamChunk:
+    text: str = ""
+    finish_reason: str = ""
+    raw_event: dict[str, Any] = field(default_factory=dict)

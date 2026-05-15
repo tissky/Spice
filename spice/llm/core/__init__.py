@@ -14,7 +14,7 @@ from spice.llm.core.runtime import (
     resolve_llm_runtime,
 )
 from spice.llm.core.task_hooks import LLMTaskHook
-from spice.llm.core.types import LLMModelConfig, LLMRequest, LLMResponse
+from spice.llm.core.types import LLMModelConfig, LLMRequest, LLMResponse, LLMStreamChunk
 
 __all__ = [
     "LLMClient",
@@ -34,4 +34,5 @@ __all__ = [
     "LLMRequest",
     "LLMModelConfig",
     "LLMResponse",
+    "LLMStreamChunk",
 ]

@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, TextIO
 
+from spice.decision.compare import render_compare_text
 from spice.runtime.approval_flow import (
     approve_approval,
     list_approvals,
@@ -15,6 +16,15 @@ from spice.runtime.approval_flow import (
     render_approval_details,
     render_approval_list,
     render_approval_resolution,
+)
+from spice.runtime.command_router import route_slash_command, split_slash_command
+from spice.runtime.context_debug import (
+    compile_sources_debug_payload,
+    compile_workspace_decision_context_payload,
+    compile_workspace_debug_payload,
+    render_decision_context_text,
+    render_sources_debug_text,
+    render_workspace_debug_text,
 )
 from spice.runtime.dry_run_executor import execute_dry_run_approval
 from spice.runtime.doctor import render_doctor_report, run_doctor
@@ -154,6 +164,11 @@ def render_interactive_shell_help(*, compact: bool = False) -> str:
         "- /act <intent>       run an execution-handoff decision",
         "- /advise <intent>    run a decision-only advisory turn",
         "- /refine <feedback>  refine the latest decision card",
+        "- /card              show the latest Decision Card",
+        "- /why               show why the latest decision won",
+        "- /sim               show latest simulation outcomes",
+        "- /json              show latest run artifact JSON",
+        "- /sources [--json]  show files, URLs, snippets, and perception artifacts used",
         "- /approvals         list approval checkpoints",
         "- /approve <id>      approve a pending checkpoint",
         "- /reject <id>       reject a pending checkpoint",
@@ -164,6 +179,8 @@ def render_interactive_shell_help(*, compact: bool = False) -> str:
         "- /timeline          show current session timeline",
         "- /stats             show session stats",
         "- /doctor            check workspace health",
+        "- /context [--json]  show the compiled model context",
+        "- /workspace [--json] show latest workspace perception",
         "- /state             show General Decision state",
         "- /session           show current session summary",
         "- /help              show this help",
@@ -186,7 +203,11 @@ def _handle_shell_command(
     persist: bool,
     full_loop_preview: bool,
 ) -> bool:
-    command, value = _split_command(line)
+    routed = route_slash_command(line)
+    command, value = routed.command, routed.value
+    if not routed.known:
+        _write(output_stream, f"unknown command: {command}. Type /help for commands.")
+        return False
     if command in {"/exit", "/quit"}:
         return True
     if command == "/help":
@@ -212,6 +233,75 @@ def _handle_shell_command(
     if command == "/state":
         try:
             _write(output_stream, _render_plain_state(store.load_state()))
+        except Exception as exc:
+            _write(output_stream, f"error: {exc}")
+        return False
+    if command == "/context":
+        try:
+            payload = compile_workspace_decision_context_payload(
+                project_root=project_root,
+                session_id=session_id,
+            )
+            if _json_requested(value):
+                _write(output_stream, json.dumps(payload, ensure_ascii=False, sort_keys=True, indent=2))
+            else:
+                _write(output_stream, render_decision_context_text(payload))
+        except Exception as exc:
+            _write(output_stream, f"error: {exc}")
+        return False
+    if command == "/workspace":
+        try:
+            payload = compile_workspace_debug_payload(
+                project_root=project_root,
+                session_id=session_id,
+            )
+            if _json_requested(value):
+                _write(output_stream, json.dumps(payload, ensure_ascii=False, sort_keys=True, indent=2))
+            else:
+                _write(output_stream, render_workspace_debug_text(payload))
+        except Exception as exc:
+            _write(output_stream, f"error: {exc}")
+        return False
+    if command == "/sources":
+        try:
+            payload = compile_sources_debug_payload(
+                project_root=project_root,
+                session_id=session_id,
+                run_id=_sources_run_id(value),
+            )
+            if _json_requested(value):
+                _write(output_stream, json.dumps(payload, ensure_ascii=False, sort_keys=True, indent=2))
+            else:
+                _write(output_stream, render_sources_debug_text(payload))
+        except Exception as exc:
+            _write(output_stream, f"error: {exc}")
+        return False
+    if command == "/card":
+        try:
+            run_payload = _load_run_for_command(store, session_id=session_id, value=value)
+            compare = _dict(run_payload.get("compare_payload"))
+            _write(output_stream, render_compare_text(compare, use_bars=use_bars))
+        except Exception as exc:
+            _write(output_stream, f"error: {exc}")
+        return False
+    if command == "/why":
+        try:
+            run_payload = _load_run_for_command(store, session_id=session_id, value=value)
+            _write(output_stream, _render_plain_why(_dict(run_payload.get("compare_payload"))))
+        except Exception as exc:
+            _write(output_stream, f"error: {exc}")
+        return False
+    if command == "/sim":
+        try:
+            run_payload = _load_run_for_command(store, session_id=session_id, value=value)
+            _write(output_stream, _render_plain_simulation(_dict(run_payload.get("compare_payload"))))
+        except Exception as exc:
+            _write(output_stream, f"error: {exc}")
+        return False
+    if command == "/json":
+        try:
+            run_payload = _load_run_for_command(store, session_id=session_id, value=value)
+            _write(output_stream, json.dumps(run_payload, ensure_ascii=False, sort_keys=True, indent=2))
         except Exception as exc:
             _write(output_stream, f"error: {exc}")
         return False
@@ -267,12 +357,12 @@ def _handle_shell_command(
         except Exception as exc:
             _write(output_stream, f"error: {exc}")
         return False
-    if command in {"/details", "/show"}:
-        if not value:
-            _write(output_stream, "error: approval id required")
-            return False
+    if command == "/details":
         try:
-            _write(output_stream, render_approval_details(load_approval(store, value)))
+            if value:
+                _write(output_stream, render_approval_details(load_approval(store, value)))
+            else:
+                _write(output_stream, _render_plain_active_frame_details(store.load_state()))
         except Exception as exc:
             _write(output_stream, f"error: {exc}")
         return False
@@ -460,10 +550,7 @@ def _run_shell_refine(
 
 
 def _split_command(line: str) -> tuple[str, str]:
-    parts = line.split(maxsplit=1)
-    command = parts[0].strip().lower()
-    value = parts[1].strip() if len(parts) > 1 else ""
-    return command, value
+    return split_slash_command(line)
 
 
 def _parse_perceive_args(value: str) -> dict[str, Any]:
@@ -528,6 +615,35 @@ def _parse_perceive_args(value: str) -> dict[str, Any]:
     return options
 
 
+def _load_run_for_command(
+    store: LocalJsonStore,
+    *,
+    session_id: str,
+    value: str,
+) -> dict[str, Any]:
+    run_id = value.strip()
+    if not run_id:
+        session = load_or_create_session(store, session_id=session_id)
+        run_id = str(session.last_run_id or "").strip()
+    if not run_id:
+        raise ValueError("No previous run is available. Type an intent first.")
+    return store.load_run(run_id)
+
+
+def _json_requested(value: str) -> bool:
+    tokens = [token.strip().lower() for token in shlex.split(value or "")]
+    return "--json" in tokens or "json" in tokens
+
+
+def _sources_run_id(value: str) -> str:
+    for token in shlex.split(value or ""):
+        normalized = token.strip()
+        if not normalized or normalized.lower() in {"--json", "json"}:
+            continue
+        return normalized
+    return ""
+
+
 def _next_value(tokens: list[str], index: int, option: str) -> str:
     next_index = index + 1
     if next_index >= len(tokens) or tokens[next_index].startswith("--"):
@@ -565,6 +681,93 @@ def _render_plain_state(state_payload: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def _render_plain_active_frame_details(state_payload: dict[str, Any]) -> str:
+    general = _general_state_payload(state_payload)
+    metadata = general.get("metadata")
+    frame = _dict(metadata).get("active_decision_frame")
+    frame_payload = _dict(frame)
+    if not frame_payload:
+        return "No active Decision Card."
+    selected = _dict(frame_payload.get("selected"))
+    return "\n".join(
+        [
+            "ACTIVE DECISION FRAME",
+            f"decision_id: {frame_payload.get('decision_id') or ''}",
+            f"run_id: {frame_payload.get('run_id') or ''}",
+            f"selected: {selected.get('label') or ''} {selected.get('title') or selected.get('recommended_action') or ''}".rstrip(),
+            f"candidate_id: {selected.get('candidate_id') or frame_payload.get('selected_candidate_id') or ''}",
+            f"approval_id: {frame_payload.get('approval_id') or ''}",
+            f"status: {frame_payload.get('status') or 'unknown'}",
+        ]
+    )
+
+
+def _render_plain_why(compare_payload: dict[str, Any]) -> str:
+    if not compare_payload:
+        return "No Decision Card found."
+    selected = _dict(compare_payload.get("selected_recommendation"))
+    lines = [
+        "WHY THIS DECISION",
+        f"selected: {selected.get('title') or 'unknown'}",
+        f"candidate_id: {selected.get('candidate_id') or ''}",
+    ]
+    if selected.get("selection_reason"):
+        lines.append(f"selection: {selected.get('selection_reason')}")
+    if selected.get("human_summary"):
+        lines.append(f"recommendation: {selected.get('human_summary')}")
+    basis = _list(selected.get("decision_basis"))
+    if basis:
+        lines.extend(["", "why this won:"])
+        for item in basis[:3]:
+            payload = _dict(item)
+            dimension = str(payload.get("dimension") or payload.get("label") or "factor")
+            contribution = payload.get("contribution")
+            lines.append(f"- {dimension}{': ' + str(contribution) if contribution is not None else ''}")
+    why_not = _list(compare_payload.get("why_not_the_others"))
+    if why_not:
+        lines.extend(["", "why not others:"])
+        for item in why_not[:3]:
+            payload = _dict(item)
+            lines.append(f"- {payload.get('title') or payload.get('candidate_id') or 'candidate'}")
+            for reason in _list(payload.get("reasons"))[:2]:
+                reason_payload = _dict(reason)
+                text = str(reason_payload.get("reason") or reason_payload.get("summary") or "").strip()
+                if text:
+                    lines.append(f"  - {text}")
+    return "\n".join(lines)
+
+
+def _render_plain_simulation(compare_payload: dict[str, Any]) -> str:
+    candidates = _list(compare_payload.get("candidate_decisions"))
+    if not candidates:
+        return "No simulation data found."
+    lines = ["SIMULATION SUMMARY"]
+    rendered = 0
+    for candidate in candidates:
+        payload = _dict(candidate)
+        simulation = _dict(payload.get("simulation"))
+        if not simulation:
+            continue
+        rendered += 1
+        lines.append("")
+        lines.append(f"{payload.get('label') or rendered}. {payload.get('title') or payload.get('candidate_id') or 'candidate'}")
+        outcome = str(simulation.get("expected_outcome") or simulation.get("simulated_outcome") or "").strip()
+        downside = str(simulation.get("downside") or "").strip()
+        success = str(simulation.get("success_signal") or "").strip()
+        confidence = simulation.get("confidence")
+        if outcome:
+            lines.append(f"- expected: {outcome}")
+        if downside:
+            lines.append(f"- downside: {downside}")
+        if success:
+            lines.append(f"- success: {success}")
+        if confidence is not None:
+            lines.append(f"- confidence: {confidence}")
+    if rendered == 0:
+        lines.append("- no LLM simulation attached to the current visible candidates")
+    return "\n".join(lines)
+
+
 def _general_state_payload(state_payload: dict[str, Any]) -> dict[str, Any]:
     world = state_payload.get("world_state")
     if not isinstance(world, dict):
@@ -579,6 +782,14 @@ def _general_state_payload(state_payload: dict[str, Any]) -> dict[str, Any]:
 def _items(payload: dict[str, Any], key: str) -> list[dict[str, Any]]:
     value = payload.get(key)
     return [item for item in value if isinstance(item, dict)] if isinstance(value, list) else []
+
+
+def _dict(value: Any) -> dict[str, Any]:
+    return dict(value) if isinstance(value, dict) else {}
+
+
+def _list(value: Any) -> list[Any]:
+    return list(value) if isinstance(value, list) else []
 
 
 def _append_plain_samples(

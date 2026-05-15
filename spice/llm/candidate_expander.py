@@ -29,6 +29,11 @@ from spice.llm.providers import (
 )
 from spice.llm.decision_proposal import LLMDecisionProposal, RUNTIME_CANDIDATE_FIELDS
 from spice.llm.proposal_normalizer import normalize_decision_proposal
+from spice.llm.read_only_intent_boundary import (
+    READ_ONLY_PERCEPTION_DECISION_MODE,
+    is_read_only_perception_decision_mode,
+    is_read_only_perception_request,
+)
 from spice.llm.util import (
     extract_first_json_array,
     extract_first_json_object,
@@ -366,6 +371,8 @@ def _decision_mode_for_intent(intent_text: str, *, explicit_options: list[str]) 
     if explicit_options:
         return "explicit_choice"
     text = str(intent_text or "").strip().lower()
+    if is_read_only_perception_request(text):
+        return READ_ONLY_PERCEPTION_DECISION_MODE
     execution_markers = (
         "/act",
         "execute",
@@ -477,13 +484,28 @@ def _candidate_from_llm_payload(
     action_type = str(payload.get("action_type") or "").strip()
     if action_type not in GENERIC_ACTION_TYPES:
         raise ValueError(f"unsupported action_type: {action_type!r}")
+    read_only_boundary_applied = is_read_only_perception_decision_mode(decision_mode)
+    if read_only_boundary_applied and action_type in {
+        "intent.execute",
+        "capability.use",
+        "approval.request",
+    }:
+        action_type = "item.triage"
     intent = str(payload.get("intent") or payload.get("summary") or "").strip()
     if not intent:
         raise ValueError("intent must be non-empty")
     target_refs = _string_list(payload.get("target_refs"))
     required_capability = str(payload.get("required_capability") or "").strip()
-    side_effect_class = _normalize_side_effect(payload.get("side_effect_class"), action_type)
-    requires_confirmation = _requires_confirmation(payload, side_effect_class, action_type)
+    side_effect_class = (
+        "read_only"
+        if read_only_boundary_applied
+        else _normalize_side_effect(payload.get("side_effect_class"), action_type)
+    )
+    requires_confirmation = (
+        False
+        if read_only_boundary_applied
+        else _requires_confirmation(payload, side_effect_class, action_type)
+    )
     why_available = _string_list(payload.get("why_available")) or [
         "LLM proposed this candidate from the current state."
     ]
@@ -504,6 +526,20 @@ def _candidate_from_llm_payload(
     )
     if explicit_option_index is not None:
         metadata["explicit_option_index"] = explicit_option_index
+    if read_only_boundary_applied:
+        for key in (
+            "approval_id",
+            "availability_status",
+            "execution_objective",
+            "execution_target",
+            "executor_task",
+            "handoff_task",
+            "required_permission_hint",
+            "requires_confirmation",
+            "requested_action",
+            "side_effect_class",
+        ):
+            metadata.pop(key, None)
 
     candidate_kind = _candidate_kind(
         metadata.get("candidate_kind") or payload.get("candidate_kind") or "decision"
@@ -511,6 +547,19 @@ def _candidate_from_llm_payload(
     execution_intent = _execution_intent(
         payload.get("execution_intent", metadata.get("execution_intent"))
     )
+    if read_only_boundary_applied:
+        execution_intent = GenericExecutionIntent(
+            intent_class="advisory",
+            requested=False,
+            reason=(
+                "Runtime read-only intent boundary: the user asked for workspace "
+                "perception or code analysis, not execution."
+            ),
+            required_permission_hint="read_only",
+            side_effect_class="read_only",
+            metadata={"source": "read_only_intent_boundary"},
+        )
+        required_capability = ""
 
     return GenericCandidate(
         candidate_id=candidate_id,
@@ -526,21 +575,30 @@ def _candidate_from_llm_payload(
         requires_confirmation=requires_confirmation,
         expected_state_delta=_expected_state_delta(payload.get("expected_state_delta")),
         execution_boundary=ExecutionBoundary(
-            mode="llm_proposed",
-            target=str(payload.get("execution_target") or ""),
+            mode="none" if read_only_boundary_applied else "llm_proposed",
+            target="" if read_only_boundary_applied else str(payload.get("execution_target") or ""),
             protocol="",
             required_capability=required_capability,
             requires_confirmation=requires_confirmation,
             side_effect_class=side_effect_class,
-            metadata={"source": "llm_candidate_expander"},
+            metadata={
+                "source": "llm_candidate_expander",
+                "read_only_intent_boundary_applied": read_only_boundary_applied,
+            },
         ),
         constraints_triggered=_dict_list(payload.get("constraints_triggered")),
         why_available=why_available,
-        why_blocked=_string_list(payload.get("why_blocked")),
+        why_blocked=[] if read_only_boundary_applied else _string_list(payload.get("why_blocked")),
         side_effect_class=side_effect_class,
-        availability_status=str(payload.get("availability_status") or "needs_confirmation")
-        if requires_confirmation
-        else str(payload.get("availability_status") or "available"),
+        availability_status=(
+            "available"
+            if read_only_boundary_applied
+            else (
+                str(payload.get("availability_status") or "needs_confirmation")
+                if requires_confirmation
+                else str(payload.get("availability_status") or "available")
+            )
+        ),
         metadata={
             **metadata,
             "source": "llm_candidate_expander",
@@ -549,6 +607,7 @@ def _candidate_from_llm_payload(
             "decision_mode": str(metadata.get("decision_mode") or decision_mode),
             "llm_generated": True,
             "execution_intent": execution_intent.to_payload(),
+            "read_only_intent_boundary_applied": read_only_boundary_applied,
             "user_facing_title": _first_string(
                 payload.get("user_facing_title"),
                 payload.get("title"),
@@ -566,7 +625,9 @@ def _candidate_from_llm_payload(
                 payload.get("expected_outcome"),
                 metadata.get("expected_result"),
             ),
-            "executor_task": _first_string(
+            "executor_task": ""
+            if read_only_boundary_applied
+            else _first_string(
                 payload.get("executor_task"),
                 payload.get("execution_objective"),
                 metadata.get("executor_task"),
@@ -624,7 +685,10 @@ def _build_expansion_prompt(
                 "runtime fields. Set execution_requested=true only when the user explicitly "
                 "asks Spice to execute, implement, create, write, modify files, run "
                 "commands, or otherwise cross the executor boundary. For open_problem and "
-                "explicit_choice, default to advisory."
+                "explicit_choice, default to advisory. If decision_mode is "
+                "read_only_perception, execution_requested must be false; reading a repo, "
+                "inspecting code, or analyzing current implementation is perception, not "
+                "execution."
             ),
             "forbidden_runtime_fields": sorted(RUNTIME_CANDIDATE_FIELDS),
         },
@@ -695,8 +759,13 @@ def _compact_decision_context_for_prompt(context_payload: dict[str, Any]) -> dic
         "recent_approvals": _take_dicts(context_payload.get("recent_approvals"), 6),
         "recent_outcomes": _take_dicts(context_payload.get("recent_outcomes"), 6),
         "executor_affordance": _dict(context_payload.get("executor_affordance")),
+        "executor_capabilities": _dict(context_payload.get("executor_capabilities")),
         "session_summary": _dict(context_payload.get("session_summary")),
         "workspace_context": _dict(context_payload.get("workspace_context")),
+        "url_context": _dict(context_payload.get("url_context")),
+        "delegated_perception_context": _dict(
+            context_payload.get("delegated_perception_context")
+        ),
         "retrieved_memory": _take_dicts(context_payload.get("retrieved_memory"), 8),
         "warnings": _string_list(context_payload.get("warnings")),
         "metadata": _dict(context_payload.get("metadata")),
@@ -774,7 +843,8 @@ def _system_prompt(display_language: str = "en") -> str:
         "Do not select a winner. Do not execute. "
         "Use compiled_context as the primary decision-relevant context. Consult "
         "current_intent, active_decision_frame, recent_decisions, recent_approvals, "
-        "executor_affordance, workspace_context, and retrieved_memory before using "
+        "executor_affordance, workspace_context, url_context, delegated_perception_context, "
+        "and retrieved_memory before using "
         "legacy state_summary. "
         "Generate 2-3 concrete decision proposals that directly address the user intent "
         "and current state. A proposal is something the user could choose as the next "
@@ -798,6 +868,9 @@ def _system_prompt(display_language: str = "en") -> str:
         "strategic or tactical advisory options. "
         "If decision_mode is execution_request, propose options that can become bounded "
         "executor tasks and mark only those proposals as execution_requested. "
+        "If decision_mode is read_only_perception, treat the request as read-only "
+        "workspace perception plus advisory analysis; do not request execution, "
+        "workspace_write permission, approval, or executor handoff. "
         "Treat runtime_guardrails as fallback runtime actions, not as the primary proposal "
         "space to extend. "
         "Avoid meta-actions such as gather more information, prepare context, ask for "

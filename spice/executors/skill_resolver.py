@@ -309,12 +309,13 @@ def _find_executor_with_capabilities(
 
 
 def _needs_executor(skill: SkillDescriptor, candidate: GenericCandidate) -> bool:
-    return bool(candidate.required_capability or skill.required_capabilities)
+    return bool(_resolution_required_capability(candidate) or skill.required_capabilities)
 
 
 def _resolved_capability_id(skill: SkillDescriptor, candidate: GenericCandidate) -> str:
-    if candidate.required_capability:
-        return candidate.required_capability
+    candidate_capability = _resolution_required_capability(candidate)
+    if candidate_capability:
+        return candidate_capability
     if len(skill.required_capabilities) == 1:
         return skill.required_capabilities[0]
     return ""
@@ -322,10 +323,27 @@ def _resolved_capability_id(skill: SkillDescriptor, candidate: GenericCandidate)
 
 def _required_capability_ids(skill: SkillDescriptor, candidate: GenericCandidate) -> list[str]:
     values: list[str] = []
-    if candidate.required_capability:
-        values.append(candidate.required_capability)
+    candidate_capability = _resolution_required_capability(candidate)
+    if candidate_capability:
+        values.append(candidate_capability)
     values.extend(skill.required_capabilities)
     return list(dict.fromkeys(value for value in values if value))
+
+
+def _resolution_required_capability(candidate: GenericCandidate) -> str:
+    """Return the capability that should constrain skill resolution.
+
+    Runtime-inferred required_capability is currently descriptive metadata for
+    decision/executor awareness. Explicit capability candidates still remain
+    hard constraints. A later matching phase can promote inferred capabilities
+    into hard blockers once executor capability compatibility is modeled
+    end-to-end.
+    """
+
+    inference = candidate.metadata.get("required_capability_inference")
+    if isinstance(inference, dict) and inference.get("source") == "runtime_inference":
+        return ""
+    return str(candidate.required_capability or "").strip()
 
 
 def _missing_skill_capability(
