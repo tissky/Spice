@@ -325,6 +325,107 @@ class RuntimeTUITests(unittest.TestCase):
         handler.assert_called_once()
         self.assertEqual(handler.call_args.kwargs["workspace_context"]["perception_id"], "workspace.followup")
 
+    def test_tui_shell_run_intent_runs_url_perception_before_missing_evidence_block(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            setup_workspace(project_root=tmp_dir)
+            output = io.StringIO()
+            shell = self._plain_output_shell(tmp_dir, output)
+            url_step = SimpleNamespace(
+                context={
+                    "perception_id": "url.new",
+                    "documents": [{"url": "https://example.com/spec", "title": "Spec"}],
+                    "facts": [{"text": "The linked spec describes terminal UX."}],
+                },
+                artifact={"perception_id": "url.new"},
+            )
+
+            with patch.object(shell, "_run_url_perception_step", return_value=url_step) as url:
+                with patch("spice.runtime.tui.shell.run_once", side_effect=RuntimeError("stop after url")) as run:
+                    should_exit = shell.handle_line("基于 https://example.com/spec 判断终端载体")
+
+        self.assertFalse(should_exit)
+        url.assert_called_once()
+        run.assert_called_once()
+        self.assertEqual(run.call_args.kwargs["url_context"]["perception_id"], "url.new")
+        self.assertNotIn(
+            "I still do not have the required evidence source after attempting perception",
+            output.getvalue(),
+        )
+
+    def test_tui_shell_follow_up_runs_url_perception_before_missing_evidence_block(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            setup_workspace(project_root=tmp_dir)
+            output = io.StringIO()
+            shell = self._plain_output_shell(tmp_dir, output)
+            _install_execution_ready_frame(shell)
+            route = SemanticRoute(
+                route="follow_up",
+                action="answer_from_decision",
+                is_continuation=True,
+                text="结合 https://example.com/spec 回答",
+                context_strategy="url",
+                needs_url_context=True,
+                url_query="结合 https://example.com/spec 回答",
+                urls=["https://example.com/spec"],
+            )
+            url_step = SimpleNamespace(
+                context={
+                    "perception_id": "url.followup",
+                    "documents": [{"url": "https://example.com/spec", "title": "Spec"}],
+                    "facts": [{"text": "The linked spec describes follow-up UX."}],
+                },
+                artifact={"perception_id": "url.followup"},
+            )
+
+            with patch("spice.runtime.tui.shell.route_semantic_input_from_runtime_config", return_value=route):
+                with patch.object(shell, "_run_url_perception_step", return_value=url_step) as url:
+                    with patch.object(shell, "_handle_continuation_resolution") as handler:
+                        handled = shell._handle_continuation("结合 https://example.com/spec 回答")
+
+        self.assertTrue(handled)
+        url.assert_called_once()
+        handler.assert_called_once()
+        self.assertEqual(handler.call_args.kwargs["url_context"]["perception_id"], "url.followup")
+        self.assertNotIn(
+            "I still do not have the required evidence source after attempting perception",
+            output.getvalue(),
+        )
+
+    def test_tui_shell_refine_runs_url_perception_before_missing_evidence_block(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            setup_workspace(project_root=tmp_dir)
+            output = io.StringIO()
+            shell = self._plain_output_shell(tmp_dir, output)
+            route = SemanticRoute(
+                route="follow_up",
+                action="refine_decision",
+                is_continuation=True,
+                text="结合 https://example.com/spec refine",
+                context_strategy="url",
+                needs_url_context=True,
+                url_query="结合 https://example.com/spec refine",
+                urls=["https://example.com/spec"],
+            )
+            url_step = SimpleNamespace(
+                context={
+                    "perception_id": "url.refine.tui",
+                    "documents": [{"url": "https://example.com/spec", "title": "Spec"}],
+                    "facts": [{"text": "The linked spec describes refine UX."}],
+                },
+                artifact={"perception_id": "url.refine.tui"},
+            )
+
+            with patch("spice.runtime.tui.shell.route_semantic_input_from_runtime_config", return_value=route):
+                with patch.object(shell, "_run_url_perception_step", return_value=url_step) as url:
+                    with patch("spice.runtime.tui.shell.refine_decision", side_effect=RuntimeError("stop after url")):
+                        shell._refine_decision("结合 https://example.com/spec refine")
+
+        url.assert_called_once()
+        self.assertNotIn(
+            "I still do not have the required evidence source after attempting perception",
+            output.getvalue(),
+        )
+
     def test_tui_shell_pre_run_evidence_gate_blocks_unconfirmed_external_workspace(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             with tempfile.TemporaryDirectory() as external_dir:
