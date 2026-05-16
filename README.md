@@ -649,6 +649,26 @@ It enables a new way to think, decide, and act:
 
 ---
 
+## 🔁 Reference Integration: Spice + Hermes
+
+
+
+This repository includes a reference bridge showing how external signals can flow into Spice and how approved decisions can be handed off to Hermes through SDEP.
+
+```text
+External signal -> Spice decision runtime -> SDEP -> Hermes executor -> outcome -> reflection
+```
+
+Start here if you want to study a full integration example:
+
+- spice-hermes-bridge/README.md
+- examples/decision_hub_demo/
+- examples/sdep_quickstart/
+
+This is a reference integration, not Spice core.
+
+---
+
 
 
 ## 🔗 SDEP (Spice Decision Execution Protocol)
