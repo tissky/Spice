@@ -40,6 +40,20 @@ Spice focuses on the missing layer:
 
 ## ❗️ 30s Dogfooding example
 
+In this demo, Spice is used to decide its own next step: **state-as-context**, **OpenChronicle proactive perception**, or **executor handoff**.  
+The default view stays conversational, while `/details` expands the full auditable Decision Card.
+
+<table>
+  <tr>
+    <td align="center" width="50%">
+      <img src="spice_dogfooding1.gif" alt="Spice dogfooding demo 1" width="100%">
+    </td>
+    <td align="center" width="50%">
+      <img src="spice_dogfooding2.gif" alt="Spice dogfooding demo 2" width="100%">
+    </td>
+  </tr>
+</table>
+
 
 
 
