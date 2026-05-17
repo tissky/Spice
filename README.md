@@ -1004,8 +1004,7 @@ A system that:
 
 ---
 
-Not just a tool.  
-Not just a chatbot.  
+Not just a tool or a chatbot.  
 
 But a **decision brain**  
 that evolves with context, outcomes, and goals over time.
