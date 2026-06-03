@@ -24,4 +24,5 @@ PYTHONDONTWRITEBYTECODE=1 python -m unittest discover -s tests
 - Keep test filenames in `test_*.py` form so `unittest discover` can find them.
 - Add an `__init__.py` to new test directories.
 - Avoid naming test directories after top-level packages such as `examples`; that can shadow the real package during discovery.
+- If I've forgotten any tests, please feel free to add them via pull requests.
 - When a test needs the repository root, resolve it robustly instead of assuming a fixed `Path(__file__).parents[...]` depth, because tests live in nested category directories.
