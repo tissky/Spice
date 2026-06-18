@@ -1115,6 +1115,7 @@ But we believe this direction leads to:
 
 > Spice is not just an assistant.  
 > It is a step toward a decision brain for everyone.
+> Brain is all we need.
 
 
 ---
